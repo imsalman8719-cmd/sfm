@@ -4,6 +4,7 @@ import {
   IsDateString, IsEnum, IsBoolean,
 } from 'class-validator';
 import { AdmissionStatus, Gender } from '../../../common/enums';
+import { OptionalUUID } from '../../../common/decorators/optional-uuid.decorator';
 
 export class CreateStudentDto {
   // User account fields
@@ -18,7 +19,8 @@ export class CreateStudentDto {
 
   // Student-specific fields
   @ApiProperty() @IsUUID() academicYearId: string;
-  @ApiPropertyOptional() @IsOptional() @IsUUID() classId?: string;
+  @OptionalUUID('Leave empty to assign class later')
+  classId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() rollNumber?: string;
   @ApiPropertyOptional() @IsOptional() @IsDateString() admissionDate?: string;
   @ApiPropertyOptional({ enum: AdmissionStatus }) @IsOptional() @IsEnum(AdmissionStatus) admissionStatus?: AdmissionStatus;

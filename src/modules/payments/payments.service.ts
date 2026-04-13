@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, BadRequestException, ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, In } from 'typeorm';
 import { format } from 'date-fns';
 import { v4 as uuidv4 } from 'uuid';
 import { Payment } from './entities/payment.entity';
@@ -81,28 +81,44 @@ export class PaymentsService {
   }
 
   async findAll(pagination: PaginationDto, filters: PaymentFilterDto): Promise<PaginatedResult<Payment>> {
-    const qb = this.paymentRepo.createQueryBuilder('p')
-      .leftJoinAndSelect('p.invoice', 'inv')
-      .leftJoinAndSelect('p.student', 's')
-      .leftJoinAndSelect('s.user', 'u')
-      .leftJoinAndSelect('s.class', 'cls');
+    const idQb = this.paymentRepo.createQueryBuilder('p')
+      .select('p.id', 'id')
+      .leftJoin('p.student', 's')
+      .leftJoin('s.user', 'u');
 
-    if (filters.studentId) qb.andWhere('p.student_id = :sid', { sid: filters.studentId });
-    if (filters.invoiceId) qb.andWhere('p.invoice_id = :iid', { iid: filters.invoiceId });
-    if (filters.method) qb.andWhere('p.method = :method', { method: filters.method });
-    if (filters.fromDate) qb.andWhere('p.payment_date >= :from', { from: filters.fromDate });
-    if (filters.toDate) qb.andWhere('p.payment_date <= :to', { to: filters.toDate });
+    if (filters.studentId) idQb.andWhere('p.student_id = :sid', { sid: filters.studentId });
+    if (filters.invoiceId) idQb.andWhere('p.invoice_id = :iid', { iid: filters.invoiceId });
+    if (filters.method) idQb.andWhere('p.method = :method', { method: filters.method });
+    if (filters.fromDate) idQb.andWhere('p.payment_date >= :from', { from: filters.fromDate });
+    if (filters.toDate) idQb.andWhere('p.payment_date <= :to', { to: filters.toDate });
 
     if (pagination.search) {
-      qb.andWhere(
+      idQb.andWhere(
         '(p.receipt_number ILIKE :q OR u.first_name ILIKE :q OR u.last_name ILIKE :q OR s.registration_number ILIKE :q)',
         { q: `%${pagination.search}%` },
       );
     }
 
-    qb.orderBy('p.payment_date', 'DESC').skip(pagination.skip).take(pagination.limit);
-    const [data, total] = await qb.getManyAndCount();
-    return new PaginatedResult(data, total, pagination.page, pagination.limit);
+    const total = await idQb.getCount();
+
+    const ids = await idQb
+      .orderBy('p.payment_date', 'DESC')
+      .addOrderBy('p.id', 'ASC')
+      .offset(pagination.skip)
+      .limit(pagination.limit)
+      .getRawMany()
+      .then((rows) => rows.map((r) => r.id));
+
+    const data = ids.length
+      ? await this.paymentRepo.find({
+          where: { id: In(ids) },
+          relations: ['invoice', 'student', 'student.user', 'student.class'],
+        })
+      : [];
+
+    const ordered = ids.map((id) => data.find((p) => p.id === id)).filter(Boolean) as Payment[];
+
+    return new PaginatedResult(ordered, total, pagination.page, pagination.limit);
   }
 
   async findOne(id: string): Promise<Payment> {

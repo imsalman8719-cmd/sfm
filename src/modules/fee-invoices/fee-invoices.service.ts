@@ -184,32 +184,49 @@ export class FeeInvoicesService {
   // ── Invoice Retrieval ───────────────────────────────────────────────────────
 
   async findAll(pagination: PaginationDto, filters: InvoiceFilterDto): Promise<PaginatedResult<FeeInvoice>> {
-    const qb = this.invoiceRepo.createQueryBuilder('inv')
-      .leftJoinAndSelect('inv.student', 's')
-      .leftJoinAndSelect('s.user', 'u')
-      .leftJoinAndSelect('s.class', 'cls')
-      .leftJoinAndSelect('inv.academicYear', 'year');
+    const idQb = this.invoiceRepo.createQueryBuilder('inv')
+      .select('inv.id', 'id')
+      .leftJoin('inv.student', 's')
+      .leftJoin('s.user', 'u')
+      .leftJoin('s.class', 'cls');
 
-    if (filters.studentId) qb.andWhere('inv.student_id = :sid', { sid: filters.studentId });
-    if (filters.academicYearId) qb.andWhere('inv.academic_year_id = :ay', { ay: filters.academicYearId });
-    if (filters.classId) qb.andWhere('cls.id = :classId', { classId: filters.classId });
-    if (filters.status) qb.andWhere('inv.status = :status', { status: filters.status });
-    if (filters.billingMonth) qb.andWhere('inv.billing_month = :month', { month: filters.billingMonth });
-    if (filters.billingYear) qb.andWhere('inv.billing_year = :year', { year: filters.billingYear });
-    if (filters.billingQuarter) qb.andWhere('inv.billing_quarter = :q', { q: filters.billingQuarter });
-    if (filters.fromDate) qb.andWhere('inv.issue_date >= :from', { from: filters.fromDate });
-    if (filters.toDate) qb.andWhere('inv.issue_date <= :to', { to: filters.toDate });
+    if (filters.studentId) idQb.andWhere('inv.student_id = :sid', { sid: filters.studentId });
+    if (filters.academicYearId) idQb.andWhere('inv.academic_year_id = :ay', { ay: filters.academicYearId });
+    if (filters.classId) idQb.andWhere('cls.id = :classId', { classId: filters.classId });
+    if (filters.status) idQb.andWhere('inv.status = :status', { status: filters.status });
+    if (filters.billingMonth) idQb.andWhere('inv.billing_month = :month', { month: filters.billingMonth });
+    if (filters.billingYear) idQb.andWhere('inv.billing_year = :year', { year: filters.billingYear });
+    if (filters.billingQuarter) idQb.andWhere('inv.billing_quarter = :q', { q: filters.billingQuarter });
+    if (filters.fromDate) idQb.andWhere('inv.issue_date >= :from', { from: filters.fromDate });
+    if (filters.toDate) idQb.andWhere('inv.issue_date <= :to', { to: filters.toDate });
 
     if (pagination.search) {
-      qb.andWhere(
+      idQb.andWhere(
         '(inv.invoice_number ILIKE :q OR u.first_name ILIKE :q OR u.last_name ILIKE :q OR s.registration_number ILIKE :q)',
         { q: `%${pagination.search}%` },
       );
     }
 
-    qb.orderBy('inv.created_at', 'DESC').skip(pagination.skip).take(pagination.limit);
-    const [data, total] = await qb.getManyAndCount();
-    return new PaginatedResult(data, total, pagination.page, pagination.limit);
+    const total = await idQb.getCount();
+
+    const ids = await idQb
+      .orderBy('inv.created_at', 'DESC')
+      .addOrderBy('inv.id', 'ASC')
+      .offset(pagination.skip)
+      .limit(pagination.limit)
+      .getRawMany()
+      .then((rows) => rows.map((r) => r.id));
+
+    const data = ids.length
+      ? await this.invoiceRepo.find({
+          where: { id: In(ids) },
+          relations: ['student', 'student.user', 'student.class', 'academicYear'],
+        })
+      : [];
+
+    const ordered = ids.map((id) => data.find((inv) => inv.id === id)).filter(Boolean) as FeeInvoice[];
+
+    return new PaginatedResult(ordered, total, pagination.page, pagination.limit);
   }
 
   async findOne(id: string): Promise<FeeInvoice> {

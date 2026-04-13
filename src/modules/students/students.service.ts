@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ConflictException, BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, In } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { Student } from './entities/student.entity';
 import { User } from '../users/entities/user.entity';
@@ -86,28 +86,43 @@ export class StudentsService {
       isActive?: boolean;
     },
   ): Promise<PaginatedResult<Student>> {
-    const qb = this.studentRepo.createQueryBuilder('student')
-      .leftJoinAndSelect('student.user', 'user')
-      .leftJoinAndSelect('student.class', 'class')
-      .leftJoinAndSelect('student.academicYear', 'year')
+    // Two-step pagination: get IDs first (no joins = no TypeORM subquery bug),
+    // then load full entities with relations using those IDs.
+    const idQb = this.studentRepo.createQueryBuilder('student')
+      .select('student.id', 'id')
+      .leftJoin('student.user', 'user')  // plain join for search/filter only
       .where('student.deleted_at IS NULL');
 
-    if (filters?.academicYearId) qb.andWhere('student.academic_year_id = :ay', { ay: filters.academicYearId });
-    if (filters?.classId) qb.andWhere('student.class_id = :classId', { classId: filters.classId });
-    if (filters?.admissionStatus) qb.andWhere('student.admission_status = :status', { status: filters.admissionStatus });
-    if (filters?.isActive !== undefined) qb.andWhere('student.is_active = :active', { active: filters.isActive });
+    if (filters?.academicYearId) idQb.andWhere('student.academic_year_id = :ay', { ay: filters.academicYearId });
+    if (filters?.classId) idQb.andWhere('student.class_id = :classId', { classId: filters.classId });
+    if (filters?.admissionStatus) idQb.andWhere('student.admission_status = :status', { status: filters.admissionStatus });
+    if (filters?.isActive !== undefined) idQb.andWhere('student.is_active = :active', { active: filters.isActive });
 
     if (pagination.search) {
-      qb.andWhere(
+      idQb.andWhere(
         `(user.first_name ILIKE :q OR user.last_name ILIKE :q OR user.email ILIKE :q
           OR student.registration_number ILIKE :q OR student.roll_number ILIKE :q)`,
         { q: `%${pagination.search}%` },
       );
     }
 
-    qb.orderBy('student.createdAt', 'DESC').skip(pagination.skip).take(pagination.limit);
-    const [data, total] = await qb.getManyAndCount();
-    return new PaginatedResult(data, total, pagination.page, pagination.limit);
+    const total = await idQb.getCount();
+
+    const ids = await idQb
+      .orderBy('student.created_at', 'DESC')
+      .addOrderBy('student.id', 'ASC')
+      .offset(pagination.skip)
+      .limit(pagination.limit)
+      .getRawMany()
+      .then((rows) => rows.map((r) => r.id));
+
+    const data = ids.length
+      ? await this.studentRepo.find({ where: { id: In(ids) }, relations: ['user', 'class', 'academicYear'] })
+      : [];
+
+    const ordered = ids.map((id) => data.find((s) => s.id === id)).filter(Boolean) as Student[];
+
+    return new PaginatedResult(ordered, total, pagination.page, pagination.limit);
   }
 
   async findOne(id: string): Promise<Student> {
@@ -189,7 +204,7 @@ export class StudentsService {
   async getDefaulters(academicYearId: string): Promise<any[]> {
     return this.studentRepo.createQueryBuilder('student')
       .leftJoinAndSelect('student.user', 'user')
-      .leftJoinAndSelect('student.class', 'class')
+      .leftJoinAndSelect('student.class', 'cls')
       .innerJoin(
         'fee_invoices', 'invoice',
         `invoice.student_id = student.id 
@@ -201,11 +216,11 @@ export class StudentsService {
       .select([
         'student.id', 'student.registrationNumber',
         'user.firstName', 'user.lastName', 'user.email',
-        'class.name', 'class.grade',
+        'cls.name', 'cls.grade',
       ])
       .addSelect('SUM(invoice.balance_amount)', 'totalDue')
       .addSelect('COUNT(invoice.id)', 'invoiceCount')
-      .groupBy('student.id, student.registrationNumber, user.firstName, user.lastName, user.email, class.name, class.grade')
+      .groupBy('student.id, student.registrationNumber, user.firstName, user.lastName, user.email, cls.name, cls.grade')
       .having('SUM(invoice.balance_amount) > 0')
       .orderBy('totalDue', 'DESC')
       .getRawMany();

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { Class } from './entities/class.entity';
 import { CreateClassDto, UpdateClassDto } from './dto/class.dto';
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
@@ -21,21 +21,33 @@ export class ClassesService {
     pagination: PaginationDto,
     academicYearId?: string,
   ): Promise<PaginatedResult<Class>> {
-    const qb = this.repo.createQueryBuilder('class')
-      .leftJoinAndSelect('class.academicYear', 'year')
-      .leftJoinAndSelect('class.classTeacher', 'teacher')
-      .where('class.deleted_at IS NULL');
+    const idQb = this.repo.createQueryBuilder('cls')
+      .select('cls.id', 'id')
+      .where('cls.deleted_at IS NULL');
 
-    if (academicYearId) qb.andWhere('class.academic_year_id = :academicYearId', { academicYearId });
+    if (academicYearId) idQb.andWhere('cls.academic_year_id = :academicYearId', { academicYearId });
     if (pagination.search) {
-      qb.andWhere('(class.name ILIKE :q OR class.grade ILIKE :q)', { q: `%${pagination.search}%` });
+      idQb.andWhere('(cls.name ILIKE :q OR cls.grade ILIKE :q)', { q: `%${pagination.search}%` });
     }
 
-    qb.orderBy('class.grade', 'ASC').addOrderBy('class.section', 'ASC')
-      .skip(pagination.skip).take(pagination.limit);
+    const total = await idQb.getCount();
 
-    const [data, total] = await qb.getManyAndCount();
-    return new PaginatedResult(data, total, pagination.page, pagination.limit);
+    const ids = await idQb
+      .orderBy('cls.grade', 'ASC')
+      .addOrderBy('cls.section', 'ASC')
+      .addOrderBy('cls.id', 'ASC')
+      .offset(pagination.skip)
+      .limit(pagination.limit)
+      .getRawMany()
+      .then((rows) => rows.map((r) => r.id));
+
+    const data = ids.length
+      ? await this.repo.find({ where: { id: In(ids) }, relations: ['academicYear', 'classTeacher'] })
+      : [];
+
+    const ordered = ids.map((id) => data.find((c) => c.id === id)).filter(Boolean) as Class[];
+
+    return new PaginatedResult(ordered, total, pagination.page, pagination.limit);
   }
 
   async findOne(id: string): Promise<Class> {

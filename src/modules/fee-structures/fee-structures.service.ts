@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { FeeStructure } from './entities/fee-structure.entity';
 import { Discount } from './entities/discount.entity';
 import {
@@ -19,7 +19,10 @@ export class FeeStructuresService {
   // ── Fee Structures ──────────────────────────────────────────────────────────
 
   async createFeeStructure(dto: CreateFeeStructureDto, createdBy?: string): Promise<FeeStructure> {
-    const fs = this.feeRepo.create({ ...dto, createdBy });
+    // Coerce empty-string optional UUID fields to null so the DB stores NULL
+    // (the frontend sends classId: "" when "All Classes" is selected)
+    const sanitized = this.sanitizeDto(dto);
+    const fs = this.feeRepo.create({ ...sanitized, createdBy });
     return this.feeRepo.save(fs);
   }
 
@@ -27,20 +30,39 @@ export class FeeStructuresService {
     pagination: PaginationDto,
     filters?: { academicYearId?: string; classId?: string; isActive?: boolean },
   ): Promise<PaginatedResult<FeeStructure>> {
-    const qb = this.feeRepo.createQueryBuilder('fs')
-      .leftJoinAndSelect('fs.academicYear', 'year')
-      .leftJoinAndSelect('fs.class', 'class');
+    // TypeORM 0.3.x bug: leftJoinAndSelect + skip/take generates a pagination
+    // subquery where createOrderByCombinedWithSelectExpression fails to resolve
+    // joined alias metadata. Fix: use a two-step approach —
+    //   1. Query just IDs with pagination (no joins, so no subquery bug)
+    //   2. Load full entities with relations using those IDs
 
-    if (filters?.academicYearId) qb.andWhere('fs.academic_year_id = :ay', { ay: filters.academicYearId });
-    if (filters?.classId) qb.andWhere('(fs.class_id = :cid OR fs.class_id IS NULL)', { cid: filters.classId });
-    if (filters?.isActive !== undefined) qb.andWhere('fs.is_active = :active', { active: filters.isActive });
-    if (pagination.search) qb.andWhere('fs.name ILIKE :q', { q: `%${pagination.search}%` });
+    const idQb = this.feeRepo.createQueryBuilder('fs')
+      .select('fs.id', 'id');
 
-    qb.orderBy('fs.sort_order', 'ASC').addOrderBy('fs.category', 'ASC')
-      .skip(pagination.skip).take(pagination.limit);
+    if (filters?.academicYearId) idQb.andWhere('fs.academic_year_id = :ay', { ay: filters.academicYearId });
+    if (filters?.classId) idQb.andWhere('(fs.class_id = :cid OR fs.class_id IS NULL)', { cid: filters.classId });
+    if (filters?.isActive !== undefined) idQb.andWhere('fs.is_active = :active', { active: filters.isActive });
+    if (pagination.search) idQb.andWhere('fs.name ILIKE :q', { q: `%${pagination.search}%` });
 
-    const [data, total] = await qb.getManyAndCount();
-    return new PaginatedResult(data, total, pagination.page, pagination.limit);
+    const total = await idQb.getCount();
+
+    const ids = await idQb
+      .orderBy('fs.sort_order', 'ASC')
+      .addOrderBy('fs.category', 'ASC')
+      .addOrderBy('fs.id', 'ASC')
+      .offset(pagination.skip)
+      .limit(pagination.limit)
+      .getRawMany()
+      .then((rows) => rows.map((r) => r.id));
+
+    const data = ids.length
+      ? await this.feeRepo.find({ where: { id: In(ids) }, relations: ['academicYear', 'class'] })
+      : [];
+
+    // find() doesn't preserve order — restore it
+    const ordered = ids.map((id) => data.find((fs) => fs.id === id)).filter(Boolean) as FeeStructure[];
+
+    return new PaginatedResult(ordered, total, pagination.page, pagination.limit);
   }
 
   async findFeeStructureById(id: string): Promise<FeeStructure> {
@@ -60,7 +82,8 @@ export class FeeStructuresService {
 
   async updateFeeStructure(id: string, dto: UpdateFeeStructureDto): Promise<FeeStructure> {
     const fs = await this.findFeeStructureById(id);
-    Object.assign(fs, dto);
+    const sanitized = this.sanitizeDto(dto);
+    Object.assign(fs, sanitized);
     return this.feeRepo.save(fs);
   }
 
@@ -83,6 +106,23 @@ export class FeeStructuresService {
     });
     await this.feeRepo.save(copies);
     return copies.length;
+  }
+
+  /**
+   * Converts empty-string values on optional UUID fields to null/undefined.
+   * This handles the case where the frontend sends classId: "" when the user
+   * selects "All Classes" from a <mat-select> with an empty-string sentinel option.
+   * An empty string would fail the DB UUID constraint or produce a wrong FK value.
+   */
+  private sanitizeDto<T extends Partial<CreateFeeStructureDto>>(dto: T): T {
+    const optionalUuidFields: Array<keyof CreateFeeStructureDto> = ['classId'];
+    const result = { ...dto } as any;
+    for (const field of optionalUuidFields) {
+      if (field in result && (result[field] === '' || result[field] === null)) {
+        result[field] = undefined; // TypeORM will store NULL when undefined on a nullable column
+      }
+    }
+    return result as T;
   }
 
   // ── Discounts ───────────────────────────────────────────────────────────────

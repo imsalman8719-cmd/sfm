@@ -3,7 +3,7 @@ import {
   IsString, IsNotEmpty, IsOptional, IsUUID, IsEnum, IsNumber, IsBoolean,
   IsArray, IsInt, Min, Max, ValidateNested, IsDateString,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import {
   FeeCategory, FeeFrequency, DiscountType, DiscountCategory,
 } from '../../../common/enums';
@@ -22,7 +22,16 @@ export class CreateFeeStructureDto {
   @ApiProperty({ enum: FeeFrequency }) @IsEnum(FeeFrequency) frequency: FeeFrequency;
   @ApiProperty() @IsNumber() @Min(0) amount: number;
   @ApiProperty() @IsUUID() academicYearId: string;
-  @ApiPropertyOptional() @IsOptional() @IsUUID() classId?: string;
+
+  // Transform empty string → undefined so @IsOptional skips @IsUUID validation.
+  // The frontend sends classId: "" when "All Classes" is selected; this means
+  // the fee structure should apply to all classes (class_id = NULL in DB).
+  @ApiPropertyOptional({ description: 'Leave empty or omit for all classes' })
+  @IsOptional()
+  @IsUUID()
+  @Transform(({ value }) => (value === '' || value === null ? undefined : value))
+  classId?: string;
+
   @ApiPropertyOptional() @IsOptional() @IsBoolean() isMandatory?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsInt() @Min(1) @Max(31) dueDayOfMonth?: number;
   @ApiPropertyOptional() @IsOptional() @IsDateString() dueDate?: string;
