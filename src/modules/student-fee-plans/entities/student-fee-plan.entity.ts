@@ -1,4 +1,4 @@
-import { Entity, Column, ManyToOne, JoinColumn, Index } from 'typeorm';
+import { Entity, Column, ManyToOne, JoinColumn, Unique } from 'typeorm';
 import { CoreEntity } from '../../../common/entities/core.entity';
 import { Student } from '../../students/entities/student.entity';
 import { FeeStructure } from '../../fee-structures/entities/fee-structure.entity';
@@ -18,7 +18,7 @@ import { FeeFrequency } from '../../../common/enums';
  * all applicable fee structures for their class (original behaviour).
  */
 @Entity('student_fee_plans')
-@Index(['studentId', 'feeStructureId', 'academicYearId'], { unique: true })
+@Unique(['studentId', 'feeStructureId', 'academicYearId', 'deletedAt'])
 export class StudentFeePlan extends CoreEntity {
   @Column({ name: 'student_id' })
   studentId: string;
@@ -76,4 +76,10 @@ export class StudentFeePlan extends CoreEntity {
 
   @Column({ name: 'created_by', nullable: true })
   createdBy: string;
+
+  // Note: deletedAt is already inherited from CoreEntity
+  // You don't need to redeclare it here if CoreEntity already has it
+  // But if CoreEntity doesn't have it, uncomment the line below:
+  // @Column({ name: 'deleted_at', type: 'timestamptz', nullable: true })
+  // deletedAt: Date;
 }

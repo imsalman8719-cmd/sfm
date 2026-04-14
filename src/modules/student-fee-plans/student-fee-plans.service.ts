@@ -10,6 +10,8 @@ import {
   BulkAssignFeePlanDto,
 } from './dto/student-fee-plan.dto';
 import { FeeFrequency } from '../../common/enums';
+import { Student } from '../students/entities/student.entity';
+import { PaginatedResult, PaginationDto } from 'src/common/dto/pagination.dto';
 
 /**
  * Multiplier table: how many monthly base-units each frequency represents.
@@ -22,12 +24,12 @@ import { FeeFrequency } from '../../common/enums';
  *  one_time   → ×1   (treated as the full amount, no multiplication)
  */
 export const FREQUENCY_MULTIPLIER: Record<FeeFrequency, number> = {
-  [FeeFrequency.ONE_TIME]:    1,
-  [FeeFrequency.MONTHLY]:     1,
-  [FeeFrequency.QUARTERLY]:   3,
+  [FeeFrequency.ONE_TIME]: 1,
+  [FeeFrequency.MONTHLY]: 1,
+  [FeeFrequency.QUARTERLY]: 3,
   [FeeFrequency.SEMI_ANNUAL]: 6,
-  [FeeFrequency.ANNUAL]:      12,
-  [FeeFrequency.CUSTOM]:      1,
+  [FeeFrequency.ANNUAL]: 12,
+  [FeeFrequency.CUSTOM]: 1,
 };
 
 @Injectable()
@@ -35,7 +37,9 @@ export class StudentFeePlansService {
   constructor(
     @InjectRepository(StudentFeePlan)
     private readonly planRepo: Repository<StudentFeePlan>,
-  ) {}
+    @InjectRepository(Student) // Now this will work
+    private studentRepo: Repository<Student>
+  ) { }
 
   // ── CRUD ────────────────────────────────────────────────────────────────────
 
@@ -44,7 +48,8 @@ export class StudentFeePlansService {
       where: {
         studentId: dto.studentId,
         feeStructureId: dto.feeStructureId,
-        academicYearId: dto.academicYearId,
+        academicYearId: dto.academicYearId
+
       },
     });
     if (existing) {
@@ -55,6 +60,98 @@ export class StudentFeePlansService {
 
     const plan = this.planRepo.create({ ...dto, createdBy });
     return this.planRepo.save(plan);
+  }
+
+  async findAll(
+    pagination: PaginationDto,
+    academicYearId?: string,
+    billingFrequency?: string,
+  ): Promise<PaginatedResult<StudentFeePlan>> {
+    const idQb = this.planRepo.createQueryBuilder('plan')
+      .select('plan.id', 'id')
+      .where('plan.deleted_at IS NULL');
+
+    // Filter by academic year
+    if (academicYearId) {
+      idQb.andWhere('plan.academic_year_id = :academicYearId', { academicYearId });
+    }
+    if (billingFrequency) {
+      idQb.andWhere('plan.billing_frequency = :billingFrequency', { billingFrequency });
+    }
+
+    // // Filter by active status (if needed)
+    // if (pagination.isActive !== undefined) {
+    //   idQb.andWhere('plan.is_active = :isActive', { isActive: pagination.isActive });
+    // }
+
+    // // Filter by billing frequency
+    // if (pagination.billingFrequency) {
+    //   idQb.andWhere('plan.billing_frequency = :billingFrequency', {
+    //     billingFrequency: pagination.billingFrequency
+    //   });
+    // }
+
+    // // Filter by fee structure
+    // if (pagination.feeStructureId) {
+    //   idQb.andWhere('plan.fee_structure_id = :feeStructureId', {
+    //     feeStructureId: pagination.feeStructureId
+    //   });
+    // }
+
+    // // Filter by student (via studentId or registration number)
+    // if (pagination.studentId) {
+    //   idQb.andWhere('plan.student_id = :studentId', { studentId: pagination.studentId });
+    // } else if (pagination.registrationNumber) {
+    //   // First find student by registration number
+    //   const student = await this.studentRepo.findOne({
+    //     where: { registrationNumber: pagination.registrationNumber, isActive: true }
+    //   });
+
+    //   if (!student) {
+    //     throw new NotFoundException(`Student with registration number ${pagination.registrationNumber} not found`);
+    //   }
+
+    //   idQb.andWhere('plan.student_id = :studentId', { studentId: student.id });
+    // }
+
+    // Search functionality (search by student name, registration number, or notes)
+    if (pagination.search) {
+      // For complex search, we need to join with student
+      idQb.leftJoin('plan.student', 'student')
+        .leftJoin('student.user', 'user')
+        .andWhere('(student.registration_number ILIKE :search OR ' +
+          'user.first_name ILIKE :search OR ' +
+          'user.last_name ILIKE :search OR ' +
+          'student.father_name ILIKE :search OR ' +
+          'plan.notes ILIKE :search)',
+          { search: `%${pagination.search}%` }
+        );
+    }
+
+    // Get total count
+    const total = await idQb.getCount();
+
+    // Get paginated IDs with sorting
+    const ids = await idQb
+      .orderBy('plan.created_at', pagination.sortOrder || 'DESC')
+      .addOrderBy('plan.id', 'ASC')
+      .offset(pagination.skip)
+      .limit(pagination.limit)
+      .getRawMany()
+      .then((rows) => rows.map((r) => r.id));
+
+    // Fetch full entities with relations
+    const data = ids.length
+      ? await this.planRepo.find({
+        where: { id: In(ids) },
+        relations: ['student', 'student.user', 'feeStructure', 'academicYear'],
+      })
+      : [];
+
+    // Order data according to ID order
+    const ordered = ids.map((id) => data.find((plan) => plan.id === id)).filter(Boolean) as StudentFeePlan[];
+
+    return new PaginatedResult(ordered, total, pagination.page, pagination.limit);
   }
 
   async bulkAssign(dto: BulkAssignFeePlanDto, createdBy?: string): Promise<{ created: number; skipped: number }> {
@@ -91,6 +188,28 @@ export class StudentFeePlansService {
     });
   }
 
+  async findByRegistrationNumber(registrationNumber: string, academicYearId?: string): Promise<StudentFeePlan[]> {
+    // First find the student by registration number
+    const student = await this.studentRepo.findOne({
+      where: { registrationNumber, isActive: true }
+    });
+
+    if (!student) {
+      throw new NotFoundException(`Student with registration number ${registrationNumber} not found`);
+    }
+
+    // Then get their fee plans
+    const where: any = { studentId: student.id, isActive: true };
+    if (academicYearId) where.academicYearId = academicYearId;
+
+    return this.planRepo.find({
+      where,
+      relations: ['feeStructure', 'academicYear'],
+      order: { createdAt: 'ASC' },
+    });
+  }
+
+
   async findOne(id: string): Promise<StudentFeePlan> {
     const plan = await this.planRepo.findOne({
       where: { id },
@@ -107,7 +226,7 @@ export class StudentFeePlansService {
   }
 
   async remove(id: string): Promise<void> {
-    await this.findOne(id);
+    await this.planRepo.findOne({where: {id}});
     await this.planRepo.softDelete(id);
   }
 
@@ -160,6 +279,7 @@ export class StudentFeePlansService {
   async previewInvoice(studentId: string, academicYearId: string): Promise<{
     hasPlan: boolean;
     plans: Array<{
+      planId: string;  // Added this field
       feeStructureName: string;
       billingFrequency: FeeFrequency;
       baseAmount: number;
@@ -179,6 +299,7 @@ export class StudentFeePlansService {
       const baseAmount = Number(p.feeStructure?.amount ?? 0);
       const billedAmount = this.resolveAmount(p);
       return {
+        planId: p.id,  // Added this line
         feeStructureName: p.feeStructure?.name ?? '',
         billingFrequency: p.billingFrequency,
         baseAmount,

@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, BadRequestException, ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, In } from 'typeorm';
+import { Repository, DataSource, In, IsNull } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { v4 as uuidv4 } from 'uuid';
 import { format, addDays } from 'date-fns';
@@ -36,7 +36,7 @@ export class FeeInvoicesService {
     @InjectRepository(GlobalSettings) private readonly settingsRepo: Repository<GlobalSettings>,
     private readonly dataSource: DataSource,
     private readonly notificationsService: NotificationsService,
-  ) {}
+  ) { }
 
   // ── Invoice Generation ──────────────────────────────────────────────────────
 
@@ -131,7 +131,7 @@ export class FeeInvoicesService {
       });
 
       const saved = await manager.save(FeeInvoice, invoice);
-      this.notificationsService.sendInvoiceNotification(saved, student).catch(() => {});
+      this.notificationsService.sendInvoiceNotification(saved, student).catch(() => { });
       return saved;
     });
   }
@@ -150,7 +150,10 @@ export class FeeInvoicesService {
       try {
         if (dto.billingMonth && dto.billingYear) {
           const existing = await this.invoiceRepo.findOne({
-            where: { studentId: student.id, billingMonth: dto.billingMonth, billingYear: dto.billingYear },
+            where: {
+              cancelledAt: IsNull(), cancelledBy: IsNull(), studentId: student.id, billingMonth: dto.billingMonth,
+               billingYear: dto.billingYear
+            },
           });
           if (existing) { skipped++; continue; }
         }
@@ -233,9 +236,11 @@ export class FeeInvoicesService {
     const overdueInvoices = invoices.filter(i => i.status === InvoiceStatus.OVERDUE);
     return {
       invoices,
-      summary: { totalBilled, totalPaid, totalWaived, totalDue,
+      summary: {
+        totalBilled, totalPaid, totalWaived, totalDue,
         overdueCount: overdueInvoices.length,
-        overdueDue: overdueInvoices.reduce((s, i) => s + Number(i.balanceAmount), 0) },
+        overdueDue: overdueInvoices.reduce((s, i) => s + Number(i.balanceAmount), 0)
+      },
     };
   }
 
@@ -341,7 +346,7 @@ export class FeeInvoicesService {
     for (const inv of invoices) {
       inv.reminderCount += 1; inv.lastReminderAt = new Date();
       await this.invoiceRepo.save(inv);
-      this.notificationsService.sendReminderNotification(inv, inv.student).catch(() => {});
+      this.notificationsService.sendReminderNotification(inv, inv.student).catch(() => { });
     }
   }
 
@@ -454,7 +459,7 @@ export class FeeInvoicesService {
   }
 
   private buildBillingLabel(dto: GenerateInvoiceDto): string {
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     if (dto.billingMonth && dto.billingYear) return `${months[dto.billingMonth - 1]} ${dto.billingYear} Fee`;
     if (dto.billingQuarter && dto.billingYear) return `Q${dto.billingQuarter} ${dto.billingYear} Fee`;
     return `Fee - ${format(new Date(dto.issueDate), 'MMM yyyy')}`;

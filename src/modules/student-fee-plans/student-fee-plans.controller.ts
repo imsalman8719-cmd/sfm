@@ -14,13 +14,14 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles, CurrentUser } from '../../common/decorators';
 import { UserRole } from '../../common/enums';
 import { ApiResponse } from '../../common/dto/api-response.dto';
+import { PaginationDto } from 'src/common/dto/pagination.dto';
 
 @ApiTags('Student Fee Plans')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('student-fee-plans')
 export class StudentFeePlansController {
-  constructor(private readonly service: StudentFeePlansService) {}
+  constructor(private readonly service: StudentFeePlansService) { }
 
   @Post()
   @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
@@ -66,6 +67,21 @@ If no plan exists, it falls back to all applicable fee structures for the studen
     return ApiResponse.success(result, `Created ${result.created} plans, skipped ${result.skipped} duplicates`);
   }
 
+  @Get()
+  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE, UserRole.ADMISSION)
+  @ApiOperation({ summary: 'Get all fee plans with pagination and filtering' })
+  @ApiQuery({ name: 'academicYearId', required: false, description: 'Filter by academic year ID' })
+  @ApiQuery({ name: 'billingFrequency', required: false, description: 'Filter by billing frequency' })
+  async findAll(
+    @Query() pagination: PaginationDto,
+    @Query('academicYearId') academicYearId?: string,
+    @Query('billingFrequency') billingFrequency?: string,
+  ) {
+    return ApiResponse.success(
+      await this.service.findAll(pagination, academicYearId, billingFrequency),
+    );
+  }
+
   @Get('student/:studentId')
   @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE, UserRole.ADMISSION)
   @ApiOperation({ summary: 'Get all fee plan entries for a student' })
@@ -76,6 +92,19 @@ If no plan exists, it falls back to all applicable fee structures for the studen
   ) {
     return ApiResponse.success(
       await this.service.findByStudent(studentId, academicYearId),
+    );
+  }
+
+  @Get('student/by-registration/:registrationNumber')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE, UserRole.ADMISSION)
+  @ApiOperation({ summary: 'Get all fee plan entries for a student by registration number' })
+  @ApiQuery({ name: 'academicYearId', required: false })
+  async findByRegistrationNumber(
+    @Param('registrationNumber') registrationNumber: string,
+    @Query('academicYearId') academicYearId?: string,
+  ) {
+    return ApiResponse.success(
+      await this.service.findByRegistrationNumber(registrationNumber, academicYearId),
     );
   }
 
