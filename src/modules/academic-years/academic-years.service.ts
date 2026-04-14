@@ -6,12 +6,45 @@ import { Repository, DataSource } from 'typeorm';
 import { AcademicYear } from './entities/academic-year.entity';
 import { CreateAcademicYearDto, UpdateAcademicYearDto } from './dto/academic-year.dto';
 
+// Define interfaces locally or import from a types file
+export interface FeeLineBreakdown {
+  feeName: string;
+  category: string;
+  frequency: string;
+  monthlyRate: number;
+  amountPerPeriod: number;
+  periodsPerYear: number;
+  annualTotal: number;
+  isCustomAmount: boolean;
+  billingMonths: string;
+}
+
+export interface StudentBreakdown {
+  studentId: string;
+  name: string;
+  registrationNumber: string;
+  hasPlan: boolean;
+  lines: FeeLineBreakdown[];
+  studentAnnualTotal: number;
+}
+
+export interface TargetBreakdown {
+  academicYear: string;
+  totalStudents: number;
+  annualTarget: number;
+  monthlyTargets: Record<string, number>;
+  quarterlyTargets: Record<string, number>;
+  students: StudentBreakdown[];
+  grandTotal: number;
+  explanation: string;
+}
+
 @Injectable()
 export class AcademicYearsService {
   constructor(
     @InjectRepository(AcademicYear) private readonly repo: Repository<AcademicYear>,
     private readonly dataSource: DataSource,
-  ) {}
+  ) { }
 
   async create(dto: CreateAcademicYearDto): Promise<AcademicYear> {
     const existing = await this.repo.findOne({ where: { name: dto.name } });
@@ -57,198 +90,285 @@ export class AcademicYearsService {
   }
 
   /**
-   * AUTO-CALCULATE fee targets for an academic year.
-   *
-   * Formula:
-   *   Annual target = Σ (per student):
-   *     • All MANDATORY fee structures applicable to the student's class × 12 months
-   *       (adjusted for their billing frequency — quarterly charges come 4×/year etc.)
-   *     • ALL active StudentFeePlan entries for that student × their billing frequency
-   *       (these include optional services like library, transport, lab)
-   *
-   * Monthly target for month M = sum of all plan items that are due in month M
-   * based on the student's chosen billing frequency and admission date.
-   *
-   * This replaces manual monthly_targets / quarterly_targets / fee_target inputs.
-   */
+     * AUTO-CALCULATE fee targets for an academic year.
+     *
+     * ─────────────────────────────────────────────────────────────
+     * RULES:
+     *
+     *  1. For each active student, determine their fee lines:
+     *     • If they have a StudentFeePlan  → use ONLY plan items
+     *       (the plan may include mandatory tuition + optional library/transport)
+     *     • If they have NO plan           → use all mandatory fee structures
+     *       for their class (class-specific OR school-wide with class_id = NULL)
+     *
+     *  2. For each fee line, calculate:
+     *     • amountPerPeriod = custom_amount ?? base_amount from fee_structure
+     *       IMPORTANT: base_amount in fee_structures is ALWAYS the MONTHLY rate
+     *       For different frequencies, we multiply by the appropriate factor:
+     *         - monthly:     amountPerPeriod = monthly_rate × 1
+     *         - quarterly:   amountPerPeriod = monthly_rate × 3
+     *         - semi_annual: amountPerPeriod = monthly_rate × 6
+     *         - annual:      amountPerPeriod = monthly_rate × 12
+     *         - one_time:    amountPerPeriod = monthly_rate (but only billed once)
+     *     
+     *     • periodsPerYear   = how many times this is charged per year
+     *       (monthly=12, quarterly=4, semi_annual=2, annual=1, one_time=1)
+     *     
+     *     • annualContribution = amountPerPeriod × periodsPerYear
+     *       This equals monthly_rate × 12 for all frequencies (no discount, no markup)
+     *
+     *  3. Monthly target for month M:
+     *     The monthly target represents the CASH EXPECTED TO BE COLLECTED in
+     *     month M — not the invoice amount. Since invoices are raised before
+     *     the period ends, collection happens in the billing month.
+     *
+     *     • Monthly plans  → add amountPerPeriod to EVERY month (Jan–Dec)
+     *     • Quarterly plans → add amountPerPeriod to months 3, 6, 9, 12
+     *                         (Q1 collected in Mar, Q2 in Jun, Q3 in Sep, Q4 in Dec)
+     *     • Semi-annual    → add amountPerPeriod to months 6 and 12
+     *     • Annual         → add amountPerPeriod to month 12
+     *     • One-time       → add amountPerPeriod to month 1 (admission month)
+     *
+     *  4. Consistency check:
+     *     Σ(monthlyTargets[1..12]) must equal annualTotal.
+     *     This is guaranteed because:
+     *       monthly:     12 months × (monthly_rate) = 12 × monthly_rate ✓
+     *       quarterly:   4 months  × (monthly_rate × 3) = 12 × monthly_rate ✓
+     *       semi_annual: 2 months  × (monthly_rate × 6) = 12 × monthly_rate ✓
+     *       annual:      1 month   × (monthly_rate × 12) = 12 × monthly_rate ✓
+     * ─────────────────────────────────────────────────────────────
+     */
+  // In your backend service (academic-year.service.ts or similar)
+
+  // In your backend service (academic-year.service.ts or similar)
+
+  // Add the recalculateTargets method
   async recalculateTargets(id: string): Promise<AcademicYear> {
     const year = await this.findOne(id);
 
-    // 1. Get all active students for this year
+    // Get the breakdown which has the correct calculations
+    const breakdown = await this.getTargetBreakdown(id);
+
+    year.feeTarget = breakdown.annualTarget;
+    year.monthlyTargets = breakdown.monthlyTargets;
+    year.quarterlyTargets = breakdown.quarterlyTargets;
+
+    return this.repo.save(year);
+  }
+
+  // Add the getTargetBreakdown method
+  async getTargetBreakdown(id: string): Promise<any> {
+    const year = await this.findOne(id);
+
+    // Frequency multipliers (converting monthly rate to period rate)
+    const frequencyMultiplier: Record<string, number> = {
+      monthly: 1,
+      quarterly: 3,
+      semi_annual: 6,
+      annual: 12,
+      one_time: 1,
+      custom: 1,
+    };
+
+    // Get all active students for this academic year with their user info
     const students = await this.dataSource.query(`
-      SELECT s.id, s.class_id, s.admission_date
-      FROM students s
-      WHERE s.academic_year_id = $1
-        AND s.is_active = true
-        AND s.deleted_at IS NULL
-    `, [id]);
+    SELECT 
+      s.id, 
+      u.first_name || ' ' || u.last_name as name,
+      s.registration_number,
+      s.class_id,
+      s.admission_date,
+      CASE WHEN COUNT(sfp.id) > 0 THEN true ELSE false END as has_plan
+    FROM students s
+    INNER JOIN users u ON u.id = s.user_id
+    LEFT JOIN student_fee_plans sfp ON sfp.student_id = s.id 
+      AND sfp.academic_year_id = $1 
+      AND sfp.is_active = true
+      AND sfp.deleted_at IS NULL
+    WHERE s.academic_year_id = $1
+      AND s.is_active = true
+      AND s.deleted_at IS NULL
+    GROUP BY s.id, u.first_name, u.last_name, s.registration_number, s.class_id, s.admission_date
+  `, [id]);
 
-    if (!students.length) {
-      year.feeTarget = 0;
-      year.monthlyTargets = {};
-      year.quarterlyTargets = {};
-      return this.repo.save(year);
-    }
-
-    // 2. Get all mandatory fee structures for this year (grouped by class)
-    const mandatoryFees = await this.dataSource.query(`
-      SELECT id, class_id, amount, frequency, category
-      FROM fee_structures
-      WHERE academic_year_id = $1
-        AND is_mandatory = true
-        AND is_active = true
-        AND deleted_at IS NULL
-    `, [id]);
-
-    // 3. Get all active student fee plans for this year (includes optional services)
-    const feePlans = await this.dataSource.query(`
-      SELECT sfp.student_id, sfp.billing_frequency, sfp.custom_amount,
-             fs.amount AS base_amount, fs.category, fs.is_mandatory
-      FROM student_fee_plans sfp
-      JOIN fee_structures fs ON fs.id = sfp.fee_structure_id
-      WHERE sfp.academic_year_id = $1
-        AND sfp.is_active = true
-        AND sfp.deleted_at IS NULL
-        AND fs.is_active = true
-    `, [id]);
-
-    // Map student_id → their fee plans
-    const plansByStudent = new Map<string, any[]>();
-    for (const plan of feePlans) {
-      if (!plansByStudent.has(plan.student_id)) plansByStudent.set(plan.student_id, []);
-      plansByStudent.get(plan.student_id).push(plan);
-    }
-
-    // Multiplier: how many billing periods per year
-    const periodsPerYear: Record<string, number> = {
-      one_time: 1, monthly: 12, quarterly: 4, semi_annual: 2, annual: 1, custom: 1,
-    };
-    // Monthly contribution: how much of the annual amount falls in each month
-    // e.g. quarterly fee is charged in months 3,6,9,12
-    const billingMonths: Record<string, number[]> = {
-      one_time:    [1],
-      monthly:     [1,2,3,4,5,6,7,8,9,10,11,12],
-      quarterly:   [3,6,9,12],
-      semi_annual: [6,12],
-      annual:      [12],
-      custom:      [1,2,3,4,5,6,7,8,9,10,11,12],
-    };
-
-    const monthlyTargets: Record<string, number> = {};
-    for (let m = 1; m <= 12; m++) monthlyTargets[m.toString()] = 0;
-
-    let annualTotal = 0;
+    const studentBreakdowns: StudentBreakdown[] = [];
 
     for (const student of students) {
-      // Determine mandatory fee structures applicable to this student's class
-      const mandatoryForStudent = mandatoryFees.filter(
-        (f: any) => !f.class_id || f.class_id === student.class_id,
-      );
+      let lines: FeeLineBreakdown[] = [];
+      let studentAnnualTotal = 0;
 
-      // If student has a fee plan, use ONLY plan items (they override class defaults)
-      const studentPlans = plansByStudent.get(student.id) || [];
+      if (student.has_plan) {
+        // Get student's custom fee plan items
+        const planItems = await this.dataSource.query(`
+        SELECT 
+          fs.name as fee_name,
+          fs.category,
+          sfp.billing_frequency as frequency,
+          COALESCE(sfp.custom_amount, fs.amount) as monthly_rate,
+          sfp.custom_amount IS NOT NULL as is_custom_amount
+        FROM student_fee_plans sfp
+        JOIN fee_structures fs ON fs.id = sfp.fee_structure_id
+        WHERE sfp.student_id = $1 
+          AND sfp.academic_year_id = $2
+          AND sfp.is_active = true
+          AND sfp.deleted_at IS NULL
+          AND fs.is_active = true
+          AND fs.deleted_at IS NULL
+      `, [student.id, id]);
 
-      let studentAnnual = 0;
+        for (const item of planItems) {
+          const monthlyRate = Number(item.monthly_rate);
+          const freq = item.frequency;
+          const multiplier = frequencyMultiplier[freq] || 1;
 
-      if (studentPlans.length > 0) {
-        // Student has an explicit fee plan — use it
-        for (const plan of studentPlans) {
-          const baseAmount = plan.custom_amount ? Number(plan.custom_amount) : Number(plan.base_amount);
-          const freq = plan.billing_frequency as string;
-          const periods = periodsPerYear[freq] ?? 1;
-          const amountPerPeriod = baseAmount;
-          const annual = amountPerPeriod * periods;
-          studentAnnual += annual;
+          // CRITICAL: amountPerPeriod = monthlyRate × multiplier
+          const amountPerPeriod = monthlyRate * multiplier;
+          const periodsPerYear = this.getPeriodsPerYear(freq);
+          const annualTotal = amountPerPeriod * periodsPerYear;
 
-          // Distribute into monthly targets
-          const months = billingMonths[freq] || [1];
-          for (const m of months) {
-            monthlyTargets[m.toString()] = (monthlyTargets[m.toString()] || 0) + amountPerPeriod;
-          }
+          lines.push({
+            feeName: item.fee_name,
+            category: item.category,
+            frequency: freq,
+            monthlyRate: monthlyRate,
+            amountPerPeriod: amountPerPeriod,
+            periodsPerYear: periodsPerYear,
+            annualTotal: annualTotal,
+            isCustomAmount: item.is_custom_amount,
+            billingMonths: this.getBillingMonths(freq)
+          });
+
+          studentAnnualTotal += annualTotal;
         }
       } else {
-        // No fee plan — use mandatory class fee structures
-        for (const fee of mandatoryForStudent) {
-          const amount = Number(fee.amount);
-          const freq = fee.frequency as string;
-          const periods = periodsPerYear[freq] ?? 1;
-          const annual = amount * periods;
-          studentAnnual += annual;
+        // Get mandatory fees for student's class (no custom plan)
+        const mandatoryFees = await this.dataSource.query(`
+        SELECT 
+          name as fee_name,
+          category,
+          frequency,
+          amount as monthly_rate,
+          false as is_custom_amount
+        FROM fee_structures
+        WHERE academic_year_id = $1
+          AND is_mandatory = true
+          AND (class_id = $2 OR class_id IS NULL)
+          AND is_active = true
+          AND deleted_at IS NULL
+      `, [id, student.class_id]);
 
-          const months = billingMonths[freq] || [1];
-          for (const m of months) {
-            monthlyTargets[m.toString()] = (monthlyTargets[m.toString()] || 0) + amount;
-          }
+        for (const fee of mandatoryFees) {
+          const monthlyRate = Number(fee.monthly_rate);
+          const freq = fee.frequency;
+          const multiplier = frequencyMultiplier[freq] || 1;
+          const amountPerPeriod = monthlyRate * multiplier;
+          const periodsPerYear = this.getPeriodsPerYear(freq);
+          const annualTotal = amountPerPeriod * periodsPerYear;
+
+          lines.push({
+            feeName: fee.fee_name,
+            category: fee.category,
+            frequency: freq,
+            monthlyRate: monthlyRate,
+            amountPerPeriod: amountPerPeriod,
+            periodsPerYear: periodsPerYear,
+            annualTotal: annualTotal,
+            isCustomAmount: false,
+            billingMonths: this.getBillingMonths(freq)
+          });
+
+          studentAnnualTotal += annualTotal;
         }
       }
 
-      annualTotal += studentAnnual;
+      studentBreakdowns.push({
+        studentId: student.id,
+        name: student.name,
+        registrationNumber: student.registration_number,
+        hasPlan: student.has_plan,
+        lines: lines,
+        studentAnnualTotal: studentAnnualTotal
+      });
     }
 
-    // Build quarterly targets from monthly
-    const quarterlyTargets: Record<string, number> = {
+    // Calculate monthly targets based on when payments are collected
+    const monthlyTargets = this.calculateMonthlyTargets(studentBreakdowns);
+    const quarterlyTargets = this.calculateQuarterlyTargets(monthlyTargets);
+    const annualTarget = studentBreakdowns.reduce((sum, s) => sum + s.studentAnnualTotal, 0);
+
+    return {
+      academicYear: year.name,
+      totalStudents: students.length,
+      annualTarget: annualTarget,
+      monthlyTargets: monthlyTargets,
+      quarterlyTargets: quarterlyTargets,
+      students: studentBreakdowns,
+      grandTotal: annualTarget,
+      explanation: "Annual total = monthly rate × 12 for all students regardless of payment frequency"
+    };
+  }
+
+  private getPeriodsPerYear(frequency: string): number {
+    const periods: Record<string, number> = {
+      monthly: 12,
+      quarterly: 4,
+      semi_annual: 2,
+      annual: 1,
+      one_time: 1,
+      custom: 12
+    };
+    return periods[frequency] || 12;
+  }
+
+  private getBillingMonths(frequency: string): string {
+    const months: Record<string, string> = {
+      monthly: 'Jan–Dec (every month)',
+      quarterly: 'Mar, Jun, Sep, Dec',
+      semi_annual: 'Jun, Dec',
+      annual: 'Dec only',
+      one_time: 'Jan only',
+      custom: 'Jan–Dec (every month)'
+    };
+    return months[frequency] || 'Monthly';
+  }
+
+  private calculateMonthlyTargets(studentBreakdowns: StudentBreakdown[]): Record<string, number> {
+    const monthlyTargets: Record<string, number> = {};
+    for (let i = 1; i <= 12; i++) monthlyTargets[i.toString()] = 0;
+
+    const billingMonthsMap: Record<string, number[]> = {
+      monthly: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      quarterly: [3, 6, 9, 12],
+      semi_annual: [6, 12],
+      annual: [12],
+      one_time: [1],
+      custom: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    };
+
+    for (const student of studentBreakdowns) {
+      for (const line of student.lines) {
+        const amountPerPeriod = line.amountPerPeriod;
+        const months = billingMonthsMap[line.frequency] || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+        for (const month of months) {
+          monthlyTargets[month.toString()] += amountPerPeriod;
+        }
+      }
+    }
+
+    return monthlyTargets;
+  }
+
+  private calculateQuarterlyTargets(monthlyTargets: Record<string, number>): Record<string, number> {
+    return {
       Q1: (monthlyTargets['1'] || 0) + (monthlyTargets['2'] || 0) + (monthlyTargets['3'] || 0),
       Q2: (monthlyTargets['4'] || 0) + (monthlyTargets['5'] || 0) + (monthlyTargets['6'] || 0),
       Q3: (monthlyTargets['7'] || 0) + (monthlyTargets['8'] || 0) + (monthlyTargets['9'] || 0),
       Q4: (monthlyTargets['10'] || 0) + (monthlyTargets['11'] || 0) + (monthlyTargets['12'] || 0),
     };
-
-    year.feeTarget = annualTotal;
-    year.monthlyTargets = monthlyTargets;
-    year.quarterlyTargets = quarterlyTargets;
-
-    return this.repo.save(year);
   }
 
-  /**
-   * Returns a detailed breakdown of how the target was calculated.
-   * Useful for showing in the UI why a certain number was arrived at.
-   */
-  async getTargetBreakdown(id: string): Promise<any> {
-    const year = await this.recalculateTargets(id); // Refresh first
 
-    const studentCount = await this.dataSource.query(`
-      SELECT COUNT(*) as count FROM students
-      WHERE academic_year_id = $1 AND is_active = true AND deleted_at IS NULL
-    `, [id]);
 
-    const planStats = await this.dataSource.query(`
-      SELECT sfp.billing_frequency, COUNT(DISTINCT sfp.student_id) as student_count,
-             SUM(COALESCE(sfp.custom_amount, fs.amount)) as total_amount,
-             fs.category
-      FROM student_fee_plans sfp
-      JOIN fee_structures fs ON fs.id = sfp.fee_structure_id
-      WHERE sfp.academic_year_id = $1 AND sfp.is_active = true AND sfp.deleted_at IS NULL
-      GROUP BY sfp.billing_frequency, fs.category
-      ORDER BY fs.category, sfp.billing_frequency
-    `, [id]);
 
-    const mandatoryStats = await this.dataSource.query(`
-      SELECT fs.category, fs.frequency, COUNT(DISTINCT s.id) as student_count,
-             SUM(fs.amount) as fee_amount
-      FROM fee_structures fs
-      CROSS JOIN students s
-      WHERE fs.academic_year_id = $1
-        AND fs.is_mandatory = true AND fs.is_active = true
-        AND (fs.class_id IS NULL OR fs.class_id = s.class_id)
-        AND s.academic_year_id = $1 AND s.is_active = true
-        AND NOT EXISTS (
-          SELECT 1 FROM student_fee_plans sfp WHERE sfp.student_id = s.id
-          AND sfp.academic_year_id = $1 AND sfp.is_active = true
-        )
-      GROUP BY fs.category, fs.frequency
-    `, [id]);
-
-    return {
-      academicYear: year.name,
-      totalStudents: parseInt(studentCount[0]?.count || '0'),
-      annualTarget: year.feeTarget,
-      monthlyTargets: year.monthlyTargets,
-      quarterlyTargets: year.quarterlyTargets,
-      breakdown: {
-        studentsWithCustomPlan: planStats,
-        studentsWithClassDefault: mandatoryStats,
-      },
-    };
-  }
 }

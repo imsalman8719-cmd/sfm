@@ -2,7 +2,7 @@ import {
   Controller, Get, Post, Put, Patch, Delete, Body, Param, UseGuards, ParseUUIDPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { AcademicYearsService } from './academic-years.service';
+import { AcademicYearsService, TargetBreakdown } from './academic-years.service';
 import { CreateAcademicYearDto, UpdateAcademicYearDto } from './dto/academic-year.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -15,7 +15,7 @@ import { ApiResponse } from '../../common/dto/api-response.dto';
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('academic-years')
 export class AcademicYearsController {
-  constructor(private readonly service: AcademicYearsService) {}
+  constructor(private readonly service: AcademicYearsService) { }
 
   @Post()
   @Roles(UserRole.SUPER_ADMIN)
@@ -57,27 +57,13 @@ export class AcademicYearsController {
   }
 
   @Post(':id/recalculate-targets')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
-  @ApiOperation({
-    summary: 'Auto-calculate fee targets for the academic year',
-    description: `Computes annual, monthly, and quarterly targets automatically from:
-    - Number of active students
-    - Mandatory fee structures for their classes
-    - Each student's fee plan (including optional services like library, transport)
-    No manual input needed. Call this whenever students are enrolled or fee plans change.`,
-  })
-  async recalculateTargets(@Param('id', ParseUUIDPipe) id: string) {
-    return ApiResponse.success(
-      await this.service.recalculateTargets(id),
-      'Targets recalculated from student enrollments and fee plans',
-    );
+  async recalculateTargets(@Param('id') id: string) {
+    return this.service.recalculateTargets(id);
   }
 
   @Get(':id/target-breakdown')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
-  @ApiOperation({ summary: 'Get detailed breakdown of how the fee target was calculated' })
-  async getTargetBreakdown(@Param('id', ParseUUIDPipe) id: string) {
-    return ApiResponse.success(await this.service.getTargetBreakdown(id));
+  async getTargetBreakdown(@Param('id') id: string): Promise<TargetBreakdown> {
+    return this.service.getTargetBreakdown(id);
   }
 
   @Delete(':id')
