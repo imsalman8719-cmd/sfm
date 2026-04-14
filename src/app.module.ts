@@ -3,7 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
-import { APP_GUARD, APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD, APP_FILTER } from '@nestjs/core';
 
 import { appConfig, dbConfig, jwtConfig, mailConfig, feeConfig } from './config';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
@@ -19,6 +19,8 @@ import { FeeInvoice } from './modules/fee-invoices/entities/fee-invoice.entity';
 import { FeeWaiver } from './modules/fee-invoices/entities/fee-waiver.entity';
 import { Payment } from './modules/payments/entities/payment.entity';
 import { NotificationLog } from './modules/notifications/entities/notification-log.entity';
+import { StudentFeePlan } from './modules/student-fee-plans/entities/student-fee-plan.entity';
+import { GlobalSettings } from './modules/settings/entities/global-settings.entity';
 
 // Feature Modules
 import { AuthModule } from './modules/auth/auth.module';
@@ -31,32 +33,25 @@ import { FeeInvoicesModule } from './modules/fee-invoices/fee-invoices.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { StudentFeePlansModule } from './modules/student-fee-plans/student-fee-plans.module';
+import { SettingsModule } from './modules/settings/settings.module';
 
 @Module({
   imports: [
-    // ── Config ───────────────────────────────────────────────────────────────
     ConfigModule.forRoot({
       isGlobal: true,
       load: [appConfig, dbConfig, jwtConfig, mailConfig, feeConfig],
       envFilePath: ['.env.local', '.env'],
     }),
-
-    // ── Scheduler (cron jobs) ─────────────────────────────────────────────────
     ScheduleModule.forRoot(),
-
-    // ── Rate Limiting ────────────────────────────────────────────────────────
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => [
-        {
-          ttl: config.get<number>('THROTTLE_TTL', 60) * 1000,
-          limit: config.get<number>('THROTTLE_LIMIT', 100),
-        },
-      ],
+      useFactory: (config: ConfigService) => [{
+        ttl: config.get<number>('THROTTLE_TTL', 60) * 1000,
+        limit: config.get<number>('THROTTLE_LIMIT', 100),
+      }],
     }),
-
-    // ── Database ──────────────────────────────────────────────────────────────
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -70,31 +65,20 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         entities: [
           User, AcademicYear, Class, Student,
           FeeStructure, Discount, FeeInvoice, FeeWaiver,
-          Payment, NotificationLog,
+          Payment, NotificationLog, StudentFeePlan, GlobalSettings,
         ],
         synchronize: config.get('database.sync'),
         logging: config.get('database.logging'),
         migrations: ['dist/database/migrations/*.js'],
       }),
     }),
-
-    // ── Feature Modules ───────────────────────────────────────────────────────
-    AuthModule,
-    UsersModule,
-    AcademicYearsModule,
-    ClassesModule,
-    StudentsModule,
-    FeeStructuresModule,
-    FeeInvoicesModule,
-    PaymentsModule,
-    ReportsModule,
-    NotificationsModule,
+    AuthModule, UsersModule, AcademicYearsModule, ClassesModule,
+    StudentsModule, FeeStructuresModule, FeeInvoicesModule,
+    PaymentsModule, ReportsModule, NotificationsModule,
+    StudentFeePlansModule, SettingsModule,
   ],
-
   providers: [
-    // Global rate-limit guard
     { provide: APP_GUARD, useClass: ThrottlerGuard },
-    // Global exception handler
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
   ],
 })

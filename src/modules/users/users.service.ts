@@ -1,11 +1,8 @@
 import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-  BadRequestException,
+  Injectable, NotFoundException, ConflictException, BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Like, FindOptionsWhere } from 'typeorm';
+import { Repository, FindOptionsWhere, DataSource } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
 import { User } from './entities/user.entity';
@@ -17,49 +14,37 @@ import { UserRole, UserStatus } from '../../common/enums';
 @Injectable()
 export class UsersService {
   constructor(
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
+    @InjectRepository(User) private readonly userRepository: Repository<User>,
+    private readonly dataSource: DataSource,
   ) {}
 
   async create(dto: CreateUserDto, createdBy?: string): Promise<User> {
-    const existing = await this.userRepository.findOne({
-      where: { email: dto.email },
-    });
+    const existing = await this.userRepository.findOne({ where: { email: dto.email } });
     if (existing) throw new ConflictException('Email already in use');
 
     const user = this.userRepository.create({
       ...dto,
       passwordHash: dto.password,
       createdBy,
-      employeeId: dto.role !== UserRole.STUDENT ? `EMP-${uuidv4().split('-')[0].toUpperCase()}` : undefined,
+      employeeId: dto.role !== UserRole.STUDENT
+        ? `EMP-${uuidv4().split('-')[0].toUpperCase()}`
+        : undefined,
     });
-
     return this.userRepository.save(user);
   }
 
   async findAll(pagination: PaginationDto, role?: UserRole): Promise<PaginatedResult<User>> {
-    const where: FindOptionsWhere<User> = {};
-    if (role) where.role = role;
-    if (pagination.search) {
-      // search by name or email handled via query builder below
-    }
-
     const qb = this.userRepository.createQueryBuilder('user')
       .where('user.deleted_at IS NULL');
-
     if (role) qb.andWhere('user.role = :role', { role });
-
     if (pagination.search) {
       qb.andWhere(
         '(user.first_name ILIKE :q OR user.last_name ILIKE :q OR user.email ILIKE :q OR user.employee_id ILIKE :q)',
         { q: `%${pagination.search}%` },
       );
     }
-
     qb.orderBy(`user.${pagination.sortBy || 'createdAt'}`, pagination.sortOrder || 'DESC')
-      .skip(pagination.skip)
-      .take(pagination.limit);
-
+      .skip(pagination.skip).take(pagination.limit);
     const [data, total] = await qb.getManyAndCount();
     return new PaginatedResult(data, total, pagination.page, pagination.limit);
   }
@@ -114,9 +99,43 @@ export class UsersService {
     await this.userRepository.update(id, { lastLogin: new Date() });
   }
 
+  /**
+   * Cascading soft-delete:
+   *   1. Soft-delete the user record
+   *   2. Soft-delete the linked student record (set is_active=false too)
+   *   3. Soft-delete all student_fee_plans for that student
+   *
+   * Invoices and payments are intentionally preserved as financial audit records.
+   */
   async softDelete(id: string): Promise<void> {
-    const user = await this.findOne(id);
-    await this.userRepository.softDelete(id);
+    await this.findOne(id); // ensure user exists
+    const now = new Date().toISOString();
+
+    await this.dataSource.transaction(async (manager) => {
+      // 1. Soft-delete user
+      await manager.query(
+        `UPDATE users SET deleted_at = $1, status = 'inactive' WHERE id = $2`,
+        [now, id],
+      );
+
+      // 2. Soft-delete student linked to this user
+      await manager.query(
+        `UPDATE students SET deleted_at = $1, is_active = false
+         WHERE user_id = $2 AND deleted_at IS NULL`,
+        [now, id],
+      );
+
+      // 3. Soft-delete all fee plans for the student
+      await manager.query(
+        `UPDATE student_fee_plans sfp
+         SET deleted_at = $1
+         FROM students s
+         WHERE sfp.student_id = s.id
+           AND s.user_id = $2
+           AND sfp.deleted_at IS NULL`,
+        [now, id],
+      );
+    });
   }
 
   async countByRole(): Promise<Record<string, number>> {

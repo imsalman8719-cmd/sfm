@@ -574,16 +574,17 @@ export class ReportsService {
       .getRawMany();
   }
 
-  private async getRecentPayments(academicYearId: string, limit: number): Promise<any[]> {
-    return this.paymentRepo.createQueryBuilder('p')
-      .innerJoin('fee_invoices', 'inv', 'inv.id = p.invoice_id AND inv.academic_year_id = :ay', { ay: academicYearId })
-      .leftJoinAndSelect('p.student', 's')
-      .leftJoinAndSelect('s.user', 'u')
-      .where('p.status = :status', { status: PaymentStatus.COMPLETED })
-      .orderBy('p.created_at', 'DESC')
-      .take(limit)
-      .getMany();
-  }
+private async getRecentPayments(academicYearId: string, limit: number): Promise<any[]> {
+  return this.paymentRepo.createQueryBuilder('p')
+    .innerJoinAndSelect('p.invoice', 'inv')
+    .leftJoinAndSelect('p.student', 's')
+    .leftJoinAndSelect('s.user', 'u')
+    .where('p.status = :status', { status: PaymentStatus.COMPLETED })
+    .andWhere('inv.academicYearId = :academicYearId', { academicYearId })
+    .orderBy('p.createdAt', 'DESC')  // Use entity property name
+    .take(limit)
+    .getMany();
+}
 
   private async getCollectedForMonth(academicYearId: string, year: number, month: number): Promise<number> {
     const r = await this.paymentRepo.createQueryBuilder('p')
