@@ -1,4 +1,4 @@
-import { Entity, Column, ManyToOne, JoinColumn, Unique } from 'typeorm';
+import { Entity, Column, ManyToOne, JoinColumn, Index, Unique } from 'typeorm';
 import { CoreEntity } from '../../../common/entities/core.entity';
 import { Student } from '../../students/entities/student.entity';
 import { FeeStructure } from '../../fee-structures/entities/fee-structure.entity';

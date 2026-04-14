@@ -2,10 +2,10 @@ import {
   Injectable, NotFoundException, BadRequestException, ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, In, IsNull } from 'typeorm';
+import { Repository, DataSource, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { v4 as uuidv4 } from 'uuid';
-import { format, addDays } from 'date-fns';
+import { format, addDays, addMonths, addQuarters } from 'date-fns';
 import { FeeInvoice } from './entities/fee-invoice.entity';
 import { FeeWaiver } from './entities/fee-waiver.entity';
 import { Student } from '../students/entities/student.entity';
@@ -48,7 +48,7 @@ export class FeeInvoicesService {
       });
       if (!student) throw new NotFoundException('Student not found');
 
-      // Step 1: Resolve fee structures — student plan OR class defaults
+      // Resolve fee line items from student fee plan OR class defaults
       const studentPlans = await manager.find(StudentFeePlan, {
         where: { studentId: dto.studentId, academicYearId: dto.academicYearId, isActive: true },
         relations: ['feeStructure'],
@@ -72,12 +72,10 @@ export class FeeInvoicesService {
           throw new BadRequestException('Student has a fee plan but all assigned fee structures are inactive.');
       } else {
         if (!student.classId)
-          throw new BadRequestException('Student is not assigned to a class and has no fee plan.');
+          throw new BadRequestException('Student has no fee plan and is not assigned to a class.');
         let feeStructures: FeeStructure[];
         if (dto.feeStructureIds?.length) {
-          feeStructures = await manager.find(FeeStructure, {
-            where: { id: In(dto.feeStructureIds), isActive: true },
-          });
+          feeStructures = await manager.find(FeeStructure, { where: { id: In(dto.feeStructureIds), isActive: true } });
         } else {
           feeStructures = await manager.createQueryBuilder(FeeStructure, 'fs')
             .where('fs.academic_year_id = :ay', { ay: dto.academicYearId })
@@ -90,7 +88,7 @@ export class FeeInvoicesService {
         lineItemInputs = feeStructures.map(fs => ({ feeStructure: fs, effectiveAmount: Number(fs.amount) }));
       }
 
-      // Step 2: Apply discounts
+      // Apply discounts
       const discounts = await manager.find(Discount, {
         where: [{ studentId: dto.studentId, academicYearId: dto.academicYearId, isActive: true }],
       });
@@ -99,34 +97,29 @@ export class FeeInvoicesService {
       let totalDiscount = 0;
       const lineItems = lineItemInputs.map(({ feeStructure: fs, effectiveAmount }) => {
         const feeAmount = effectiveAmount;
-        const applicableDiscount = discounts.find(d => !d.feeStructureId || d.feeStructureId === fs.id);
+        const disc = discounts.find(d => !d.feeStructureId || d.feeStructureId === fs.id);
         let discountAmount = 0;
-        if (applicableDiscount) {
-          discountAmount = applicableDiscount.type === DiscountType.PERCENTAGE
-            ? (feeAmount * applicableDiscount.value) / 100
-            : Math.min(applicableDiscount.value, feeAmount);
+        if (disc) {
+          discountAmount = disc.type === DiscountType.PERCENTAGE
+            ? (feeAmount * disc.value) / 100
+            : Math.min(disc.value, feeAmount);
         }
-        const netAmount = feeAmount - discountAmount;
         subtotal += feeAmount;
         totalDiscount += discountAmount;
-        return { feeStructureId: fs.id, feeName: fs.name, category: fs.category, amount: feeAmount, discountAmount, netAmount };
+        return { feeStructureId: fs.id, feeName: fs.name, category: fs.category, amount: feeAmount, discountAmount, netAmount: feeAmount - discountAmount };
       });
 
       const totalAmount = subtotal - totalDiscount;
       const invoice = manager.create(FeeInvoice, {
         invoiceNumber: this.generateInvoiceNumber(),
-        studentId: dto.studentId,
-        academicYearId: dto.academicYearId,
-        billingMonth: dto.billingMonth,
-        billingYear: dto.billingYear,
+        studentId: dto.studentId, academicYearId: dto.academicYearId,
+        billingMonth: dto.billingMonth, billingYear: dto.billingYear,
         billingQuarter: dto.billingQuarter,
         billingLabel: dto.billingLabel || this.buildBillingLabel(dto),
-        issueDate: new Date(dto.issueDate),
-        dueDate: new Date(dto.dueDate),
+        issueDate: new Date(dto.issueDate), dueDate: new Date(dto.dueDate),
         status: InvoiceStatus.ISSUED,
-        subtotal, discountAmount: totalDiscount,
-        lateFeeAmount: 0, totalAmount,
-        paidAmount: 0, balanceAmount: totalAmount, waivedAmount: 0,
+        subtotal, discountAmount: totalDiscount, lateFeeAmount: 0,
+        totalAmount, paidAmount: 0, balanceAmount: totalAmount, waivedAmount: 0,
         lineItems, notes: dto.notes, createdBy,
       });
 
@@ -150,10 +143,7 @@ export class FeeInvoicesService {
       try {
         if (dto.billingMonth && dto.billingYear) {
           const existing = await this.invoiceRepo.findOne({
-            where: {
-              cancelledAt: IsNull(), cancelledBy: IsNull(), studentId: student.id, billingMonth: dto.billingMonth,
-               billingYear: dto.billingYear
-            },
+            where: { studentId: student.id, billingMonth: dto.billingMonth, billingYear: dto.billingYear },
           });
           if (existing) { skipped++; continue; }
         }
@@ -277,12 +267,11 @@ export class FeeInvoicesService {
     const waivedAmount = dto.type === DiscountType.PERCENTAGE
       ? (Number(inv.balanceAmount) * dto.value) / 100
       : Math.min(dto.value, Number(inv.balanceAmount));
-    const waiver = this.waiverRepo.create({
+    return this.waiverRepo.save(this.waiverRepo.create({
       invoiceId: dto.invoiceId, studentId: inv.studentId,
       type: dto.type, value: dto.value, waivedAmount, reason: dto.reason,
       status: WaiverStatus.PENDING, requestedBy,
-    });
-    return this.waiverRepo.save(waiver);
+    }));
   }
 
   async reviewWaiver(waiverId: string, dto: ReviewWaiverDto, reviewedBy: string): Promise<FeeWaiver> {
@@ -314,13 +303,12 @@ export class FeeInvoicesService {
     return qb.orderBy('w.created_at', 'DESC').getMany();
   }
 
-  // ── Scheduled Jobs ──────────────────────────────────────────────────────────
+  // ── Scheduled: Mark overdue ──────────────────────────────────────────────────
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
   async markOverdueInvoices(): Promise<void> {
     const settings = await this.settingsRepo.findOne({ where: { id: 'global' } });
     if (!settings?.autoOverdueMarkingEnabled) return;
-
     await this.invoiceRepo.createQueryBuilder()
       .update(FeeInvoice)
       .set({ status: InvoiceStatus.OVERDUE })
@@ -330,12 +318,13 @@ export class FeeInvoicesService {
       .execute();
   }
 
+  // ── Scheduled: Reminders ─────────────────────────────────────────────────────
+
   @Cron('0 9 * * *')
   async sendPaymentReminders(): Promise<void> {
     const settings = await this.settingsRepo.findOne({ where: { id: 'global' } });
     if (!settings?.autoReminderEnabled) return;
-    const daysBeforeDue = settings.reminderDaysBeforeDue ?? 3;
-    const dueSoon = addDays(new Date(), daysBeforeDue);
+    const dueSoon = addDays(new Date(), settings.reminderDaysBeforeDue ?? 3);
     const invoices = await this.invoiceRepo.createQueryBuilder('inv')
       .leftJoinAndSelect('inv.student', 's').leftJoinAndSelect('s.user', 'u')
       .where('inv.due_date <= :dueSoon', { dueSoon })
@@ -351,15 +340,24 @@ export class FeeInvoicesService {
   }
 
   /**
-   * Runs every day at 6 AM.
-   * Generates invoices automatically based on each student's fee plan frequency
-   * and the dates configured in GlobalSettings by the super admin.
+   * ── SMART AUTO-GENERATION (runs daily at 6 AM) ───────────────────────────
    *
-   * Logic:
-   *  - Monthly   → generate on monthlyInvoiceDay of each month
-   *  - Quarterly → generate N days before quarter end (quarterlyInvoiceDaysBefore)
-   *  - Semi-Annual → generate N days before half-year end
-   *  - Annual    → generate N days before academic year end
+   * For each student, checks their fee plan frequency against today's date:
+   *
+   *  MONTHLY:    Generate if today == monthlyInvoiceDay AND no invoice exists for this month
+   *
+   *  QUARTERLY:  Generate if today == trigger day (N days before quarter end)
+   *              AND the current quarter is the right one based on when they last paid.
+   *              e.g. Student who paid for Q1 → next due is Q2 (months 4-6)
+   *
+   *  SEMI-ANNUAL: Generate if today == trigger day AND last invoice was 6 months ago
+   *
+   *  ANNUAL:     Generate if today == trigger day AND last invoice was 12 months ago
+   *
+   *  ONE_TIME:   Never auto-generated (manual only)
+   *
+   * This means a quarterly student only gets an invoice every 3 months,
+   * not every month. The system checks their last invoice to decide.
    */
   @Cron('0 6 * * *')
   async autoGenerateInvoices(): Promise<void> {
@@ -377,91 +375,213 @@ export class FeeInvoicesService {
     const issueDate = format(today, 'yyyy-MM-dd');
     const dueDate = format(addDays(today, dueDays), 'yyyy-MM-dd');
 
-    // Monthly
-    if (dayOfMonth === settings.monthlyInvoiceDay) {
-      await this.autoGenerateForFrequency(FeeFrequency.MONTHLY, academicYear.id, issueDate, dueDate, {
-        billingMonth: currentMonth, billingYear: currentYear,
-      });
+    // Get all active student fee plans (grouped by student)
+    const allPlans = await this.feePlanRepo.find({
+      where: { academicYearId: academicYear.id, isActive: true },
+      relations: ['feeStructure'],
+    });
+
+    // Group plans by student
+    const plansByStudent = new Map<string, StudentFeePlan[]>();
+    for (const plan of allPlans) {
+      if (!plansByStudent.has(plan.studentId)) plansByStudent.set(plan.studentId, []);
+      plansByStudent.get(plan.studentId).push(plan);
     }
 
-    // Quarterly
-    const quarterEnds = [
-      { q: 1, month: 3, day: 31 }, { q: 2, month: 6, day: 30 },
-      { q: 3, month: 9, day: 30 }, { q: 4, month: 12, day: 31 },
-    ];
-    for (const qe of quarterEnds) {
-      const endDate = new Date(currentYear, qe.month - 1, qe.day);
-      const daysLeft = Math.ceil((endDate.getTime() - today.getTime()) / 86400000);
-      if (daysLeft === settings.quarterlyInvoiceDaysBefore) {
-        await this.autoGenerateForFrequency(FeeFrequency.QUARTERLY, academicYear.id, issueDate, dueDate, {
-          billingQuarter: qe.q, billingYear: currentYear,
-        });
+    for (const [studentId, plans] of plansByStudent.entries()) {
+      // Determine the dominant billing frequency for this student
+      // (take the highest frequency plan — monthly wins over quarterly etc.)
+      const dominantFreq = this.getDominantFrequency(plans.map(p => p.billingFrequency));
+
+      if (dominantFreq === FeeFrequency.ONE_TIME || dominantFreq === FeeFrequency.CUSTOM) {
+        continue; // Never auto-generate one-time or custom
       }
-    }
 
-    // Semi-Annual
-    const semiEnds = [{ half: 1, month: 6, day: 30 }, { half: 2, month: 12, day: 31 }];
-    for (const se of semiEnds) {
-      const endDate = new Date(currentYear, se.month - 1, se.day);
-      const daysLeft = Math.ceil((endDate.getTime() - today.getTime()) / 86400000);
-      if (daysLeft === settings.semiAnnualInvoiceDaysBefore) {
-        await this.autoGenerateForFrequency(FeeFrequency.SEMI_ANNUAL, academicYear.id, issueDate, dueDate, {
-          billingQuarter: se.half, billingYear: currentYear,
-          billingLabel: `Semi-Annual H${se.half} ${currentYear}`,
-        });
-      }
-    }
-
-    // Annual
-    const yearEnd = new Date(academicYear.endDate);
-    const daysToYearEnd = Math.ceil((yearEnd.getTime() - today.getTime()) / 86400000);
-    if (daysToYearEnd === settings.annualInvoiceDaysBefore) {
-      await this.autoGenerateForFrequency(FeeFrequency.ANNUAL, academicYear.id, issueDate, dueDate, {
-        billingYear: currentYear, billingLabel: `Annual Fee ${academicYear.name}`,
-      });
-    }
-  }
-
-  private async autoGenerateForFrequency(
-    frequency: FeeFrequency,
-    academicYearId: string,
-    issueDate: string,
-    dueDate: string,
-    billingInfo: { billingMonth?: number; billingYear?: number; billingQuarter?: number; billingLabel?: string },
-  ): Promise<void> {
-    const rows = await this.feePlanRepo
-      .createQueryBuilder('p')
-      .select('DISTINCT p.student_id', 'studentId')
-      .where('p.billing_frequency = :freq', { freq: frequency })
-      .andWhere('p.academic_year_id = :ay', { ay: academicYearId })
-      .andWhere('p.is_active = true')
-      .andWhere('p.deleted_at IS NULL')
-      .getRawMany();
-
-    for (const row of rows) {
       try {
-        // Duplicate check for this period
-        const dupWhere: any = { studentId: row.studentId, academicYearId };
-        if (billingInfo.billingMonth) dupWhere.billingMonth = billingInfo.billingMonth;
-        if (billingInfo.billingYear) dupWhere.billingYear = billingInfo.billingYear;
-        if (billingInfo.billingQuarter) dupWhere.billingQuarter = billingInfo.billingQuarter;
-        if (await this.invoiceRepo.findOne({ where: dupWhere })) continue;
+        const shouldGenerate = await this.shouldGenerateForStudent(
+          studentId, academicYear.id, dominantFreq,
+          today, dayOfMonth, currentMonth, currentYear,
+          settings,
+        );
 
-        await this.generateInvoice({ studentId: row.studentId, academicYearId, issueDate, dueDate, ...billingInfo }, 'system-auto');
+        if (!shouldGenerate.generate) continue;
+
+        await this.generateInvoice({
+          studentId,
+          academicYearId: academicYear.id,
+          issueDate,
+          dueDate,
+          billingMonth: shouldGenerate.billingMonth,
+          billingYear: currentYear,
+          billingQuarter: shouldGenerate.billingQuarter,
+          billingLabel: shouldGenerate.label,
+        }, 'system-auto');
       } catch (e) {
-        console.error(`[AutoInvoice][${frequency}] Student ${row.studentId}: ${e.message}`);
+        console.error(`[AutoInvoice] Student ${studentId}: ${e.message}`);
       }
     }
   }
+
+  /**
+   * Determines if a student should get an invoice today, based on:
+   *  1. Their billing frequency
+   *  2. Today's date vs the configured trigger day
+   *  3. Their LAST invoice date (to avoid generating too early)
+   */
+  private async shouldGenerateForStudent(
+    studentId: string,
+    academicYearId: string,
+    frequency: FeeFrequency,
+    today: Date,
+    dayOfMonth: number,
+    currentMonth: number,
+    currentYear: number,
+    settings: GlobalSettings,
+  ): Promise<{ generate: boolean; billingMonth?: number; billingQuarter?: number; label?: string,billingYear?: number}> {
+    // Get the student's last non-cancelled invoice for this year
+    const lastInvoice = await this.invoiceRepo.findOne({
+      where: { studentId, academicYearId },
+      order: { issueDate: 'DESC' },
+    });
+
+    const lastIssueDate = lastInvoice ? new Date(lastInvoice.issueDate) : null;
+
+    if (frequency === FeeFrequency.MONTHLY) {
+      // Only generate on the configured monthlyInvoiceDay
+      if (dayOfMonth !== settings.monthlyInvoiceDay) return { generate: false };
+
+      // Check no invoice exists for this month yet
+      const existing = await this.invoiceRepo.findOne({
+        where: { studentId, academicYearId, billingMonth: currentMonth, billingYear: currentYear },
+      });
+      if (existing) return { generate: false };
+
+      return {
+        generate: true,
+        billingMonth: currentMonth,
+        label: `${this.monthName(currentMonth)} ${currentYear} Fee`,
+      };
+    }
+
+    if (frequency === FeeFrequency.QUARTERLY) {
+      // Trigger N days before quarter end
+      const quarterEnds = [
+        { q: 1, month: 3, day: 31 }, { q: 2, month: 6, day: 30 },
+        { q: 3, month: 9, day: 30 }, { q: 4, month: 12, day: 31 },
+      ];
+
+      for (const qe of quarterEnds) {
+        const endDate = new Date(currentYear, qe.month - 1, qe.day);
+        const daysLeft = Math.ceil((endDate.getTime() - today.getTime()) / 86400000);
+        if (daysLeft !== settings.quarterlyInvoiceDaysBefore) continue;
+
+        // Check if student already has an invoice for this quarter
+        const existing = await this.invoiceRepo.findOne({
+          where: { studentId, academicYearId, billingQuarter: qe.q, billingYear: currentYear },
+        });
+        if (existing) return { generate: false };
+
+        // Verify: last invoice was at least 2.5 months ago (not a duplicate)
+        if (lastIssueDate) {
+          const monthsSinceLast = (today.getTime() - lastIssueDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
+          if (monthsSinceLast < 2) return { generate: false };
+        }
+
+        return {
+          generate: true,
+          billingQuarter: qe.q,
+          label: `Q${qe.q} ${currentYear} Fee`,
+        };
+      }
+      return { generate: false };
+    }
+
+    if (frequency === FeeFrequency.SEMI_ANNUAL) {
+      const semiEnds = [{ half: 1, month: 6, day: 30 }, { half: 2, month: 12, day: 31 }];
+      for (const se of semiEnds) {
+        const endDate = new Date(currentYear, se.month - 1, se.day);
+        const daysLeft = Math.ceil((endDate.getTime() - today.getTime()) / 86400000);
+        if (daysLeft !== settings.semiAnnualInvoiceDaysBefore) continue;
+
+        const existing = await this.invoiceRepo.findOne({
+          where: { studentId, academicYearId, billingQuarter: se.half, billingYear: currentYear },
+        });
+        if (existing) return { generate: false };
+
+        // Must be at least 5 months since last invoice
+        if (lastIssueDate) {
+          const monthsSinceLast = (today.getTime() - lastIssueDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
+          if (monthsSinceLast < 5) return { generate: false };
+        }
+
+        return {
+          generate: true,
+          billingQuarter: se.half,
+          label: `Semi-Annual H${se.half} ${currentYear}`,
+        };
+      }
+      return { generate: false };
+    }
+
+    if (frequency === FeeFrequency.ANNUAL) {
+      const yearEnd = new Date(academicYearId); // will be overridden
+      const academicYr = await this.yearRepo.findOne({ where: { id: academicYearId } });
+      if (!academicYr) return { generate: false };
+
+      const yearEndDate = new Date(academicYr.endDate);
+      const daysLeft = Math.ceil((yearEndDate.getTime() - today.getTime()) / 86400000);
+      if (daysLeft !== settings.annualInvoiceDaysBefore) return { generate: false };
+
+      // Only one annual invoice per year
+      const existing = await this.invoiceRepo.findOne({
+        where: { studentId, academicYearId, billingYear: currentYear },
+      });
+      if (existing) return { generate: false };
+
+      return {
+        generate: true,
+        billingYear: currentYear,
+        label: `Annual Fee ${academicYr.name}`,
+      };
+    }
+
+    return { generate: false };
+  }
+
+  /**
+   * Given a list of billing frequencies, returns the "dominant" one:
+   * monthly > quarterly > semi_annual > annual > one_time
+   * (The highest frequency determines the auto-generation trigger.)
+   */
+  private getDominantFrequency(frequencies: FeeFrequency[]): FeeFrequency {
+    const priority = {
+      [FeeFrequency.MONTHLY]: 5,
+      [FeeFrequency.QUARTERLY]: 4,
+      [FeeFrequency.SEMI_ANNUAL]: 3,
+      [FeeFrequency.ANNUAL]: 2,
+      [FeeFrequency.ONE_TIME]: 1,
+      [FeeFrequency.CUSTOM]: 0,
+    };
+    return frequencies.reduce((highest, freq) => {
+      return (priority[freq] ?? 0) > (priority[highest] ?? 0) ? freq : highest;
+    }, frequencies[0]);
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
 
   private generateInvoiceNumber(): string {
     return `INV-${format(new Date(), 'yyyyMM')}-${uuidv4().split('-')[0].toUpperCase()}`;
   }
 
   private buildBillingLabel(dto: GenerateInvoiceDto): string {
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    if (dto.billingMonth && dto.billingYear) return `${months[dto.billingMonth - 1]} ${dto.billingYear} Fee`;
-    if (dto.billingQuarter && dto.billingYear) return `Q${dto.billingQuarter} ${dto.billingYear} Fee`;
+    if (dto.billingMonth && dto.billingYear)
+      return `${this.monthName(dto.billingMonth)} ${dto.billingYear} Fee`;
+    if (dto.billingQuarter && dto.billingYear)
+      return `Q${dto.billingQuarter} ${dto.billingYear} Fee`;
     return `Fee - ${format(new Date(dto.issueDate), 'MMM yyyy')}`;
+  }
+
+  private monthName(m: number): string {
+    return ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m] || '';
   }
 }

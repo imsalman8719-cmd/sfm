@@ -56,6 +56,30 @@ export class AcademicYearsController {
     return ApiResponse.success(await this.service.setCurrent(id), 'Set as current');
   }
 
+  @Post(':id/recalculate-targets')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  @ApiOperation({
+    summary: 'Auto-calculate fee targets for the academic year',
+    description: `Computes annual, monthly, and quarterly targets automatically from:
+    - Number of active students
+    - Mandatory fee structures for their classes
+    - Each student's fee plan (including optional services like library, transport)
+    No manual input needed. Call this whenever students are enrolled or fee plans change.`,
+  })
+  async recalculateTargets(@Param('id', ParseUUIDPipe) id: string) {
+    return ApiResponse.success(
+      await this.service.recalculateTargets(id),
+      'Targets recalculated from student enrollments and fee plans',
+    );
+  }
+
+  @Get(':id/target-breakdown')
+  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  @ApiOperation({ summary: 'Get detailed breakdown of how the fee target was calculated' })
+  async getTargetBreakdown(@Param('id', ParseUUIDPipe) id: string) {
+    return ApiResponse.success(await this.service.getTargetBreakdown(id));
+  }
+
   @Delete(':id')
   @Roles(UserRole.SUPER_ADMIN)
   @ApiOperation({ summary: 'Delete academic year' })
