@@ -1,5 +1,5 @@
 import {
-  Injectable, NotFoundException, ConflictException, BadRequestException,
+  Injectable, NotFoundException, ConflictException, Inject, forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
@@ -8,7 +8,8 @@ import { Student } from './entities/student.entity';
 import { User } from '../users/entities/user.entity';
 import { CreateStudentDto, UpdateStudentDto, AssignClassDto } from './dto/student.dto';
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
-import { UserRole, AdmissionStatus } from '../../common/enums';
+import { UserRole, AdmissionStatus, FeeFrequency } from '../../common/enums';
+import { FeeInvoicesService } from '../fee-invoices/fee-invoices.service';
 
 @Injectable()
 export class StudentsService {
@@ -16,15 +17,19 @@ export class StudentsService {
     @InjectRepository(Student) private readonly studentRepo: Repository<Student>,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly dataSource: DataSource,
+    @Inject(forwardRef(() => FeeInvoicesService))
+    private readonly feeInvoicesService: FeeInvoicesService,
   ) {}
 
   async create(dto: CreateStudentDto, createdBy?: string): Promise<Student> {
-    return this.dataSource.transaction(async (manager) => {
-      // 1. Check email uniqueness
-      const existingUser = await manager.findOne(User, { where: { email: dto.email } });
-      if (existingUser) throw new ConflictException('Email already in use');
+    // Step 1: Validate email uniqueness
+    const existingUser = await this.userRepo.findOne({ where: { email: dto.email } });
+    if (existingUser) throw new ConflictException('Email already in use');
 
-      // 2. Create User account
+    let savedStudent: Student;
+
+    await this.dataSource.transaction(async (manager) => {
+      // Step 2: Create user account
       const user = manager.create(User, {
         firstName: dto.firstName,
         lastName: dto.lastName,
@@ -39,12 +44,12 @@ export class StudentsService {
       });
       const savedUser = await manager.save(User, user);
 
-      // 3. Generate registration number: STU-YYYY-XXXXX
+      // Step 3: Generate registration number
       const year = new Date().getFullYear();
       const seq = uuidv4().split('-')[0].toUpperCase();
       const registrationNumber = `STU-${year}-${seq}`;
 
-      // 4. Create Student profile
+      // Step 4: Create student profile with fee preferences
       const student = manager.create(Student, {
         userId: savedUser.id,
         registrationNumber,
@@ -53,6 +58,8 @@ export class StudentsService {
         rollNumber: dto.rollNumber,
         admissionDate: dto.admissionDate ? new Date(dto.admissionDate) : new Date(),
         admissionStatus: dto.admissionStatus || AdmissionStatus.ADMITTED,
+        billingFrequency: dto.billingFrequency || FeeFrequency.MONTHLY,
+        selectedFeeStructureIds: dto.selectedFeeStructureIds || [],
         fatherName: dto.fatherName,
         fatherPhone: dto.fatherPhone,
         fatherEmail: dto.fatherEmail,
@@ -71,10 +78,22 @@ export class StudentsService {
         hostelRequired: dto.hostelRequired || false,
         hasSiblings: dto.hasSiblings || false,
         notes: dto.notes,
+        createdBy,
       });
-
-      return manager.save(Student, student);
+      savedStudent = await manager.save(Student, student);
     });
+
+    // Step 5: Generate full-year invoices OUTSIDE the transaction
+    // so that a billing failure doesn't roll back the student creation.
+    // Errors are logged but not thrown — the student is already enrolled.
+    try {
+      await this.feeInvoicesService.generateYearInvoices(savedStudent, createdBy);
+    } catch (e) {
+      console.error(`[StudentsService] Year-invoice generation failed for ${savedStudent.registrationNumber}: ${e.message}`);
+    }
+
+    // Return the fully loaded student
+    return this.findOne(savedStudent.id);
   }
 
   async findAll(
@@ -86,11 +105,9 @@ export class StudentsService {
       isActive?: boolean;
     },
   ): Promise<PaginatedResult<Student>> {
-    // Two-step pagination: get IDs first (no joins = no TypeORM subquery bug),
-    // then load full entities with relations using those IDs.
     const idQb = this.studentRepo.createQueryBuilder('student')
       .select('student.id', 'id')
-      .leftJoin('student.user', 'user')  // plain join for search/filter only
+      .leftJoin('student.user', 'user')
       .where('student.deleted_at IS NULL');
 
     if (filters?.academicYearId) idQb.andWhere('student.academic_year_id = :ay', { ay: filters.academicYearId });
@@ -107,48 +124,37 @@ export class StudentsService {
     }
 
     const total = await idQb.getCount();
-
     const ids = await idQb
       .orderBy('student.created_at', 'DESC')
       .addOrderBy('student.id', 'ASC')
       .offset(pagination.skip)
       .limit(pagination.limit)
       .getRawMany()
-      .then((rows) => rows.map((r) => r.id));
+      .then(rows => rows.map(r => r.id));
 
     const data = ids.length
       ? await this.studentRepo.find({ where: { id: In(ids) }, relations: ['user', 'class', 'academicYear'] })
       : [];
 
-    const ordered = ids.map((id) => data.find((s) => s.id === id)).filter(Boolean) as Student[];
-
+    const ordered = ids.map(id => data.find(s => s.id === id)).filter(Boolean) as Student[];
     return new PaginatedResult(ordered, total, pagination.page, pagination.limit);
   }
 
   async findOne(id: string): Promise<Student> {
-    const s = await this.studentRepo.findOne({
-      where: { id },
-      relations: ['user', 'class', 'academicYear'],
-    });
+    const s = await this.studentRepo.findOne({ where: { id }, relations: ['user', 'class', 'academicYear'] });
     if (!s) throw new NotFoundException(`Student #${id} not found`);
     return s;
   }
 
   async findByUserId(userId: string): Promise<Student> {
-    const s = await this.studentRepo.findOne({
-      where: { userId },
-      relations: ['user', 'class', 'academicYear'],
-    });
+    const s = await this.studentRepo.findOne({ where: { userId }, relations: ['user', 'class', 'academicYear'] });
     if (!s) throw new NotFoundException('Student profile not found');
     return s;
   }
 
   async findByRegistrationNumber(regNo: string): Promise<Student> {
-    const s = await this.studentRepo.findOne({
-      where: { registrationNumber: regNo },
-      relations: ['user', 'class', 'academicYear'],
-    });
-    if (!s) throw new NotFoundException(`Student with registration number '${regNo}' not found`);
+    const s = await this.studentRepo.findOne({ where: { registrationNumber: regNo }, relations: ['user', 'class', 'academicYear'] });
+    if (!s) throw new NotFoundException(`Student '${regNo}' not found`);
     return s;
   }
 
@@ -157,15 +163,15 @@ export class StudentsService {
       const student = await this.findOne(id);
 
       // Update user fields if provided
-      if (dto.firstName || dto.lastName || dto.email || dto.phone || dto.address) {
-        await manager.update(User, student.userId, {
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          email: dto.email,
-          phone: dto.phone,
-          address: dto.address,
-          gender: dto.gender,
-        });
+      const userUpdate: any = {};
+      if (dto.firstName !== undefined) userUpdate.firstName = dto.firstName;
+      if (dto.lastName !== undefined) userUpdate.lastName = dto.lastName;
+      if (dto.email !== undefined) userUpdate.email = dto.email;
+      if (dto.phone !== undefined) userUpdate.phone = dto.phone;
+      if (dto.address !== undefined) userUpdate.address = dto.address;
+      if (dto.gender !== undefined) userUpdate.gender = dto.gender;
+      if (Object.keys(userUpdate).length) {
+        await manager.update(User, student.userId, userUpdate);
       }
 
       // Update student fields
@@ -194,36 +200,9 @@ export class StudentsService {
     return this.studentRepo.createQueryBuilder('s')
       .leftJoinAndSelect('s.user', 'user')
       .where('s.id != :id', { id: studentId })
-      .andWhere('(s.father_phone = :fp OR s.mother_phone = :mp)', {
-        fp: student.fatherPhone, mp: student.motherPhone,
-      })
+      .andWhere('(s.father_phone = :fp OR s.mother_phone = :mp)', { fp: student.fatherPhone, mp: student.motherPhone })
       .andWhere('s.is_active = true')
       .getMany();
-  }
-
-  async getDefaulters(academicYearId: string): Promise<any[]> {
-    return this.studentRepo.createQueryBuilder('student')
-      .leftJoinAndSelect('student.user', 'user')
-      .leftJoinAndSelect('student.class', 'cls')
-      .innerJoin(
-        'fee_invoices', 'invoice',
-        `invoice.student_id = student.id 
-         AND invoice.academic_year_id = :ayId 
-         AND invoice.status IN ('issued','overdue','partially_paid')
-         AND invoice.balance_amount > 0`,
-        { ayId: academicYearId },
-      )
-      .select([
-        'student.id', 'student.registrationNumber',
-        'user.firstName', 'user.lastName', 'user.email',
-        'cls.name', 'cls.grade',
-      ])
-      .addSelect('SUM(invoice.balance_amount)', 'totalDue')
-      .addSelect('COUNT(invoice.id)', 'invoiceCount')
-      .groupBy('student.id, student.registrationNumber, user.firstName, user.lastName, user.email, cls.name, cls.grade')
-      .having('SUM(invoice.balance_amount) > 0')
-      .orderBy('totalDue', 'DESC')
-      .getRawMany();
   }
 
   async getTotalCount(academicYearId?: string): Promise<number> {

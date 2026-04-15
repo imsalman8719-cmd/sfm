@@ -1,13 +1,13 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import {
   IsString, IsNotEmpty, IsOptional, IsUUID, IsEmail,
-  IsDateString, IsEnum, IsBoolean,
+  IsDateString, IsEnum, IsBoolean, IsArray,
 } from 'class-validator';
-import { AdmissionStatus, Gender } from '../../../common/enums';
+import { AdmissionStatus, FeeFrequency, Gender } from '../../../common/enums';
 import { OptionalUUID } from '../../../common/decorators/optional-uuid.decorator';
 
 export class CreateStudentDto {
-  // User account fields
+  // User account
   @ApiProperty() @IsString() @IsNotEmpty() firstName: string;
   @ApiProperty() @IsString() @IsNotEmpty() lastName: string;
   @ApiProperty() @IsEmail() email: string;
@@ -17,13 +17,21 @@ export class CreateStudentDto {
   @ApiPropertyOptional() @IsOptional() @IsString() phone?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() address?: string;
 
-  // Student-specific fields
+  // Academic
   @ApiProperty() @IsUUID() academicYearId: string;
-  @OptionalUUID('Leave empty to assign class later')
-  classId?: string;
+  @OptionalUUID('Leave empty to assign class later') classId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() rollNumber?: string;
   @ApiPropertyOptional() @IsOptional() @IsDateString() admissionDate?: string;
   @ApiPropertyOptional({ enum: AdmissionStatus }) @IsOptional() @IsEnum(AdmissionStatus) admissionStatus?: AdmissionStatus;
+
+  // Fee preference — drives year-wide invoice generation on registration
+  @ApiPropertyOptional({ enum: FeeFrequency, default: FeeFrequency.MONTHLY })
+  @IsOptional() @IsEnum(FeeFrequency)
+  billingFrequency?: FeeFrequency;
+
+  @ApiPropertyOptional({ type: [String], description: 'Optional fee structure IDs (library, transport, lab…)' })
+  @IsOptional() @IsArray() @IsUUID('4', { each: true })
+  selectedFeeStructureIds?: string[];
 
   // Parent / Guardian
   @ApiPropertyOptional() @IsOptional() @IsString() fatherName?: string;

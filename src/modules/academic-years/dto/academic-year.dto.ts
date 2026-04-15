@@ -17,4 +17,6 @@ export class CreateAcademicYearDto {
   @ApiPropertyOptional() @IsOptional() @IsObject() quarterlyTargets?: Record<string, number>;
 }
 
-export class UpdateAcademicYearDto extends PartialType(CreateAcademicYearDto) {}
+export class UpdateAcademicYearDto extends PartialType(CreateAcademicYearDto) {
+  
+}

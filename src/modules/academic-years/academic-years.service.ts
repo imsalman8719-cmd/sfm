@@ -1,5 +1,6 @@
 import {
   Injectable, NotFoundException, ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -71,10 +72,57 @@ export class AcademicYearsService {
   }
 
   async update(id: string, dto: UpdateAcademicYearDto): Promise<AcademicYear> {
-    const year = await this.findOne(id);
-    if (dto.isCurrent) await this.repo.update({}, { isCurrent: false });
-    Object.assign(year, dto);
-    return this.repo.save(year);
+    // Check if academic year exists
+    const existingYear = await this.findOne(id);
+    console.log(`Update year info ${JSON.stringify(dto)}`)
+    // Build update data - map isCurrent to isActive if your entity uses isActive
+    const updateData: any = {};
+
+    if (dto.name !== undefined) updateData.name = dto.name;
+    if (dto.startDate !== undefined) updateData.startDate = dto.startDate;
+    if (dto.endDate !== undefined) updateData.endDate = dto.endDate;
+    if (dto.description !== undefined) updateData.description = dto.description;
+    if (dto.isCurrent !== undefined) updateData.isCurrent = dto.isCurrent;
+
+    
+    console.log('Update data being sent to repository:', updateData);
+
+    // Check if there's any data to update
+    if (Object.keys(updateData).length === 0) {
+      throw new BadRequestException('No valid update data provided');
+    }
+
+    // If dates are being updated, check for overlaps
+    if (dto.startDate || dto.endDate) {
+      const startDate = dto.startDate || existingYear.startDate;
+      const endDate = dto.endDate || existingYear.endDate;
+
+      const overlapping = await this.repo
+        .createQueryBuilder('ay')
+        .where('ay.id != :id', { id })
+        .andWhere(
+          '(ay.start_date <= :endDate AND ay.end_date >= :startDate)',
+          { startDate, endDate },
+        )
+        .getOne();
+
+      if (overlapping) {
+        throw new BadRequestException('Dates overlap with another academic year');
+      }
+    }
+
+    // If setting as current (active), unset others
+    if (updateData.isCurrent === true) {
+      console.log('set other to non current');
+      await this.repo.update({ isCurrent: true }, { isCurrent: false });
+    }
+
+    console.log(`set this one to current ${JSON.stringify(updateData)}`);
+    // Perform the update
+    await this.repo.update(id, updateData);
+
+    // Return the updated entity
+    return this.findOne(id);
   }
 
   async setCurrent(id: string): Promise<AcademicYear> {

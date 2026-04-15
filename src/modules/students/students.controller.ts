@@ -49,12 +49,12 @@ export class StudentsController {
     return ApiResponse.success(result);
   }
 
-  @Get('defaulters')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
-  @ApiOperation({ summary: 'Get list of students with outstanding dues' })
-  async getDefaulters(@Query('academicYearId') academicYearId: string) {
-    return ApiResponse.success(await this.service.getDefaulters(academicYearId));
-  }
+  // @Get('defaulters')
+  // @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  // @ApiOperation({ summary: 'Get list of students with outstanding dues' })
+  // async getDefaulters(@Query('academicYearId') academicYearId: string) {
+  //   return ApiResponse.success(await this.service.getDefaulters(academicYearId));
+  // }
 
   @Get('me')
   @Roles(UserRole.STUDENT)

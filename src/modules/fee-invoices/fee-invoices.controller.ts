@@ -29,12 +29,12 @@ export class FeeInvoicesController {
     return ApiResponse.success(await this.service.generateInvoice(dto, userId), 'Invoice generated');
   }
 
-  @Post('bulk-generate')
-  @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
-  @ApiOperation({ summary: 'Bulk generate invoices for a class or entire year' })
-  async bulkGenerate(@Body() dto: BulkGenerateInvoiceDto, @CurrentUser('id') userId: string) {
-    return ApiResponse.success(await this.service.bulkGenerateInvoices(dto, userId), 'Bulk generation complete');
-  }
+  // @Post('bulk-generate')
+  // @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  // @ApiOperation({ summary: 'Bulk generate invoices for a class or entire year' })
+  // async bulkGenerate(@Body() dto: BulkGenerateInvoiceDto, @CurrentUser('id') userId: string) {
+  //   return ApiResponse.success(await this.service.bulkGenerateInvoices(dto, userId), 'Bulk generation complete');
+  // }
 
   @Get()
   @Roles(UserRole.SUPER_ADMIN, UserRole.FINANCE, UserRole.TEACHER)
