@@ -23,6 +23,20 @@ export class ReportsService {
   // ── Dashboard Summary ───────────────────────────────────────────────────────
 
   async getDashboardSummary(academicYearId: string): Promise<any> {
+    // If no academicYearId supplied (or empty string), fall back to the current academic year
+    if (!academicYearId) {
+      const current = await this.yearRepo.findOne({ where: { isCurrent: true } });
+      academicYearId = current?.id || '';
+    }
+    if (!academicYearId) {
+      // No academic year exists at all — return zeroed dashboard
+      return {
+        summary: { totalStudents:0, totalInvoiced:0, totalCollected:0, totalOutstanding:0,
+          overdueAmount:0, totalWaived:0, defaulterCount:0, collectionRate:'0%' },
+        charts: { monthlyTrend:[], classWiseSummary:[], paymentMethodBreakdown:[] },
+        recentPayments: [],
+      };
+    }
     const [
       totalStudents,
       totalInvoiced,
