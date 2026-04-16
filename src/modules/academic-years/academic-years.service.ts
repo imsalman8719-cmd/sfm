@@ -258,7 +258,6 @@ export class AcademicYearsService {
         WHERE fs.academic_year_id = $1
           AND fs.is_active = true
           AND fs.deleted_at IS NULL
-          AND fs.category != 'admission'
           AND (
             -- Mandatory fees for this class (or school-wide)
             (fs.is_mandatory = true AND (fs.class_id = $2 OR fs.class_id IS NULL))
@@ -271,8 +270,11 @@ export class AcademicYearsService {
 
         for (const fee of studentFees) {
           const monthlyRate = Number(fee.monthly_rate);
-          // Use the STUDENT'S billing_frequency, not the fee structure's own frequency.
-          const freq = student.billing_frequency || 'monthly';
+          // One-time fees (admission) always use one_time frequency regardless of student preference.
+          // All recurring fees use the student's chosen billing_frequency.
+          const freq = (fee.category === 'admission' || fee.frequency === 'one_time')
+            ? 'one_time'
+            : (student.billing_frequency || 'monthly');
           const multiplier = frequencyMultiplier[freq] || 1;
           const amountPerPeriod = monthlyRate * multiplier;
           const periodsPerYear = this.getPeriodsPerYear(freq);
