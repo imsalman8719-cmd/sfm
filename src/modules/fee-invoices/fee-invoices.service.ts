@@ -5,7 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { v4 as uuidv4 } from 'uuid';
-import { format, addDays, addMonths, startOfMonth, endOfMonth, getMonth, getYear, differenceInMonths } from 'date-fns';
+import { format, addDays, addMonths, startOfMonth, endOfMonth, getMonth, getYear } from 'date-fns';
 import { FeeInvoice } from './entities/fee-invoice.entity';
 import { FeeWaiver } from './entities/fee-waiver.entity';
 import { Student } from '../students/entities/student.entity';
@@ -72,68 +72,67 @@ export class FeeInvoicesService {
    */
   async generateYearInvoices(student: Student, createdBy?: string): Promise<FeeInvoice[]> {
     const settings = await this.settingsRepo.findOne({ where: { id: 'global' } });
-    const dueDays = settings?.monthlyInvoiceDay ?? 5;
+    const dueDays = settings?.defaultDueDays ?? 10;
 
     const academicYear = await this.yearRepo.findOne({ where: { id: student.academicYearId } });
-    if (!academicYear) {
-      console.log('No academic year found for ID:', student.academicYearId);
-      return [];
-    }
+    if (!academicYear) return [];
 
     const yearEnd = new Date(academicYear.endDate);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Check if academic year hasn't started yet or has already ended
-    if (today > yearEnd) {
-      console.log('Academic year has already ended:', { today, yearEnd });
-      return [];
-    }
-
     // Load all applicable fee structures for this student
     const allFeeStructures = await this.resolveStudentFeeStructures(student);
-    
-    if (allFeeStructures.length === 0) {
-      console.log('No fee structures found for student:', student.id);
-      return [];
-    }
 
     const admissionFees = allFeeStructures.filter(fs => fs.category === FeeCategory.ADMISSION);
     const recurringFees = allFeeStructures.filter(fs => fs.category !== FeeCategory.ADMISSION);
 
     const generated: FeeInvoice[] = [];
 
-    // ── 1. Admission fee invoice (due today) ──────────────────────────────
-    if (admissionFees.length) {
+    // Compute all recurring billing periods first
+    const billingPeriods = recurringFees.length
+      ? this.computeBillingPeriods(today, yearEnd, student.billingFrequency, dueDays)
+      : [];
+
+    // ── Invoice #1: Admission fee + first billing period in ONE invoice ───
+    //
+    // Rationale: at the moment of enrollment the student pays admission fee
+    // together with whatever their first billing period is (first month fee,
+    // first quarter fee, or full year fee). Combining them into a single
+    // invoice makes it easier for finance to collect one payment at the desk.
+    //
+    const firstPeriod = billingPeriods[0] ?? null;
+    const firstFeeStructures = [
+      ...admissionFees,
+      ...(firstPeriod ? recurringFees : []),
+    ];
+
+    if (firstFeeStructures.length) {
+      // Label: "Admission + Jan 2025 Fee" or "Admission + Q1 2025 Fee" etc.
+      // If there are no recurring fees, just "Admission Fee".
+      const label = firstPeriod
+        ? `Admission + ${firstPeriod.label}`
+        : 'Admission Fee';
+
       const inv = await this.buildAndSaveInvoice({
         student,
-        feeStructures: admissionFees,
+        feeStructures: admissionFees,        // admission lines at ×1
+        extraFeeStructures: recurringFees,    // recurring lines at period multiplier
+        extraMultiplier: firstPeriod?.multiplier ?? 1,
         issueDate: today,
-        dueDate: today,                 // admission fee due immediately
-        billingLabel: 'Admission Fee',
-        billingYear: getYear(today),
+        dueDate: today,                       // due immediately at enrollment
+        billingLabel: label,
+        billingMonth: firstPeriod?.billingMonth,
+        billingQuarter: firstPeriod?.billingQuarter,
+        billingYear: firstPeriod?.billingYear ?? getYear(today),
         academicYearId: student.academicYearId,
         createdBy,
       });
       generated.push(inv);
     }
 
-    if (!recurringFees.length) {
-      console.log('No recurring fees found');
-      return generated;
-    }
-
-    // ── 2. Recurring invoices based on billing frequency ──────────────────
-    const billingPeriods = this.computeBillingPeriods(
-      today,
-      yearEnd,
-      student.billingFrequency,
-      dueDays,
-    );
-
-    console.log(`Generated ${billingPeriods.length} billing periods for frequency ${student.billingFrequency}`);
-
-    for (const period of billingPeriods) {
+    // ── Invoices #2–N: remaining billing periods (future dates) ──────────
+    for (const period of billingPeriods.slice(1)) {
       const inv = await this.buildAndSaveInvoice({
         student,
         feeStructures: recurringFees,
@@ -185,12 +184,8 @@ export class FeeInvoicesService {
     const seen = new Set(mandatory.map(f => f.id));
     const merged = [...mandatory];
     for (const f of optional) {
-      if (!seen.has(f.id)) { 
-        merged.push(f); 
-        seen.add(f.id); 
-      }
+      if (!seen.has(f.id)) { merged.push(f); seen.add(f.id); }
     }
-    
     return merged;
   }
 
@@ -223,137 +218,99 @@ export class FeeInvoicesService {
     const multiplier = FREQ_MULTIPLIER[frequency] ?? 1;
     const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-    // Normalize dates
-    const startDate = new Date(admissionDate);
-    startDate.setHours(0, 0, 0, 0);
-    const endDate = new Date(yearEnd);
-    endDate.setHours(0, 0, 0, 0);
-
-    // If admission date is after year end, return empty
-    if (startDate > endDate) {
-      return periods;
-    }
-
     if (frequency === FeeFrequency.MONTHLY || frequency === FeeFrequency.CUSTOM) {
-      // Get the current month and year
-      let currentYear = startDate.getFullYear();
-      let currentMonth = startDate.getMonth();
-      
-      // Get the last month from yearEnd
-      const endYear = endDate.getFullYear();
-      const endMonth = endDate.getMonth();
-      
-      // Calculate total months to generate
-      let totalMonths = (endYear - currentYear) * 12 + (endMonth - currentMonth) + 1;
-      
-      // Generate invoice for each remaining month
-      for (let i = 0; i < totalMonths; i++) {
-        const year = currentYear;
-        const month = currentMonth + 1;
-        
-        // Calculate issue date
-        let issueDate: Date;
-        if (i === 0) {
-          // First month: use admission date
-          issueDate = new Date(startDate);
-        } else {
-          // Subsequent months: use 1st of the month
-          issueDate = new Date(year, currentMonth, 1);
-        }
-        
-        // Ensure issue date is not after year end
-        if (issueDate > endDate) break;
-        
+      // One invoice per remaining calendar month
+      let cursor = new Date(admissionDate);
+      cursor.setDate(1); // start from the 1st of the admission month
+
+      while (cursor <= yearEnd) {
+        const month = cursor.getMonth() + 1;
+        const year = cursor.getFullYear();
+        // Issue on the 1st; due in dueDays
+        const issueDate = new Date(year, month - 1, 1);
+        const dueDate = addDays(issueDate, dueDays);
+
+        // First period: issue today (student just enrolled), due in dueDays
+        const effectiveIssue = cursor.getTime() === new Date(admissionDate.getFullYear(), admissionDate.getMonth(), 1).getTime()
+          ? new Date(admissionDate) : issueDate;
+
         periods.push({
-          issueDate: issueDate,
-          dueDate: addDays(issueDate, dueDays),
+          issueDate: effectiveIssue,
+          dueDate: addDays(effectiveIssue, dueDays),
           label: `${MONTHS[month]} ${year} Fee`,
           billingMonth: month,
           billingYear: year,
           multiplier: 1,
         });
-        
-        // Move to next month
-        currentMonth++;
-        if (currentMonth > 11) {
-          currentMonth = 0;
-          currentYear++;
-        }
+
+        cursor = addMonths(cursor, 1);
       }
 
     } else if (frequency === FeeFrequency.QUARTERLY) {
-      // Calculate starting quarter
-      let currentYear = startDate.getFullYear();
-      let currentQuarter = Math.floor(startDate.getMonth() / 3) + 1;
-      
-      // Get quarter start month
-      let quarterStartMonth = (currentQuarter - 1) * 3;
-      let quarterStartDate = new Date(currentYear, quarterStartMonth, 1);
-      
-      // If we're in the middle of a quarter, still generate for current quarter
-      while (quarterStartDate <= endDate) {
-        const issueDate = (periods.length === 0) ? new Date(startDate) : new Date(quarterStartDate);
-        
-        if (issueDate <= endDate) {
-          periods.push({
-            issueDate: issueDate,
-            dueDate: addDays(issueDate, dueDays),
-            label: `Q${currentQuarter} ${currentYear} Fee`,
-            billingQuarter: currentQuarter,
-            billingYear: currentYear,
-            multiplier: 3,
-          });
-        }
-        
-        // Move to next quarter
-        currentQuarter++;
-        if (currentQuarter > 4) {
-          currentQuarter = 1;
-          currentYear++;
-        }
-        quarterStartMonth = (currentQuarter - 1) * 3;
-        quarterStartDate = new Date(currentYear, quarterStartMonth, 1);
+      // Quarters: Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec
+      const quarterStarts = [1, 4, 7, 10]; // month numbers
+
+      for (const qStart of quarterStarts) {
+        const year = admissionDate.getFullYear();
+        const qStartDate = new Date(year, qStart - 1, 1);
+        const qEnd = new Date(year, qStart + 1, 0); // last day of the quarter end month
+
+        // Skip if this quarter has already fully passed
+        if (qEnd < admissionDate) continue;
+        // Skip if quarter starts after year end
+        if (qStartDate > yearEnd) continue;
+
+        const quarter = Math.ceil(qStart / 3);
+        const issueDate = qStartDate < admissionDate ? new Date(admissionDate) : qStartDate;
+
+        periods.push({
+          issueDate,
+          dueDate: addDays(issueDate, dueDays),
+          label: `Q${quarter} ${year} Fee`,
+          billingQuarter: quarter,
+          billingYear: year,
+          multiplier: 3,
+        });
       }
 
     } else if (frequency === FeeFrequency.SEMI_ANNUAL) {
-      // Calculate starting half-year
-      let currentYear = startDate.getFullYear();
-      let currentHalf = startDate.getMonth() < 6 ? 1 : 2;
-      
-      // Get half start month
-      let halfStartMonth = currentHalf === 1 ? 0 : 6;
-      let halfStartDate = new Date(currentYear, halfStartMonth, 1);
-      
-      while (halfStartDate <= endDate) {
-        const issueDate = (periods.length === 0) ? new Date(startDate) : new Date(halfStartDate);
-        
-        if (issueDate <= endDate) {
-          periods.push({
-            issueDate: issueDate,
-            dueDate: addDays(issueDate, dueDays),
-            label: `H${currentHalf} ${currentYear} Fee`,
-            billingQuarter: currentHalf,
-            billingYear: currentYear,
-            multiplier: 6,
-          });
-        }
-        
-        // Move to next half
-        currentHalf = currentHalf === 1 ? 2 : 1;
-        if (currentHalf === 1) currentYear++;
-        halfStartMonth = currentHalf === 1 ? 0 : 6;
-        halfStartDate = new Date(currentYear, halfStartMonth, 1);
+      // H1=Jan-Jun, H2=Jul-Dec
+      const halves = [
+        { h: 1, start: 1, end: 6 },
+        { h: 2, start: 7, end: 12 },
+      ];
+      const year = admissionDate.getFullYear();
+
+      for (const half of halves) {
+        const hStart = new Date(year, half.start - 1, 1);
+        const hEnd = new Date(year, half.end, 0);
+        if (hEnd < admissionDate) continue;
+        if (hStart > yearEnd) continue;
+
+        const issueDate = hStart < admissionDate ? new Date(admissionDate) : hStart;
+        periods.push({
+          issueDate,
+          dueDate: addDays(issueDate, dueDays),
+          label: `Half-Year H${half.h} ${year} Fee`,
+          billingQuarter: half.h,
+          billingYear: year,
+          multiplier: 6,
+        });
       }
 
     } else if (frequency === FeeFrequency.ANNUAL) {
-      // Single invoice for the remaining academic period
+      // Single invoice for the full academic year
+      const year = admissionDate.getFullYear();
       periods.push({
-        issueDate: new Date(startDate),
-        dueDate: addDays(new Date(startDate), dueDays),
-        label: `Annual Fee ${startDate.getFullYear()}-${endDate.getFullYear()}`,
-        billingYear: startDate.getFullYear(),
+        issueDate: new Date(admissionDate),
+        dueDate: addDays(new Date(admissionDate), dueDays),
+        label: `Annual Fee ${year}`,
+        billingYear: year,
         multiplier: 12,
       });
+
+    } else if (frequency === FeeFrequency.ONE_TIME) {
+      // Nothing — one-time fees are handled separately
     }
 
     return periods;
@@ -365,7 +322,9 @@ export class FeeInvoicesService {
    */
   private async buildAndSaveInvoice(params: {
     student: Student;
-    feeStructures: FeeStructure[];
+    feeStructures: FeeStructure[];          // primary fee lines (multiplied by frequencyMultiplier)
+    extraFeeStructures?: FeeStructure[];    // secondary fee lines (multiplied by extraMultiplier)
+    extraMultiplier?: number;               // multiplier for extraFeeStructures
     issueDate: Date;
     dueDate: Date;
     billingLabel: string;
@@ -377,7 +336,8 @@ export class FeeInvoicesService {
     createdBy?: string;
   }): Promise<FeeInvoice> {
     const {
-      student, feeStructures, issueDate, dueDate, billingLabel,
+      student, feeStructures, extraFeeStructures = [], extraMultiplier = 1,
+      issueDate, dueDate, billingLabel,
       billingMonth, billingQuarter, billingYear, academicYearId,
       frequencyMultiplier = 1, createdBy,
     } = params;
@@ -390,8 +350,9 @@ export class FeeInvoicesService {
     let subtotal = 0;
     let totalDiscount = 0;
 
-    const lineItems = feeStructures.map(fs => {
-      const feeAmount = Number(fs.amount) * frequencyMultiplier;
+    // Helper: build one line item
+    const buildLine = (fs: FeeStructure, mult: number) => {
+      const feeAmount = Number(fs.amount) * mult;
       const disc = discounts.find(d => !d.feeStructureId || d.feeStructureId === fs.id);
       let discountAmount = 0;
       if (disc) {
@@ -409,7 +370,12 @@ export class FeeInvoicesService {
         discountAmount,
         netAmount: feeAmount - discountAmount,
       };
-    });
+    };
+
+    const lineItems = [
+      ...feeStructures.map(fs => buildLine(fs, frequencyMultiplier)),
+      ...extraFeeStructures.map(fs => buildLine(fs, extraMultiplier)),
+    ];
 
     const totalAmount = subtotal - totalDiscount;
 
