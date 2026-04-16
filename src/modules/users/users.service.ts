@@ -103,7 +103,6 @@ export class UsersService {
    * Cascading soft-delete:
    *   1. Soft-delete the user record
    *   2. Soft-delete the linked student record (set is_active=false too)
-   *   3. Soft-delete all student_fee_plans for that student
    *
    * Invoices and payments are intentionally preserved as financial audit records.
    */
@@ -125,16 +124,6 @@ export class UsersService {
         [now, id],
       );
 
-      // 3. Soft-delete all fee plans for the student
-      await manager.query(
-        `UPDATE student_fee_plans sfp
-         SET deleted_at = $1
-         FROM students s
-         WHERE sfp.student_id = s.id
-           AND s.user_id = $2
-           AND sfp.deleted_at IS NULL`,
-        [now, id],
-      );
     });
   }
 

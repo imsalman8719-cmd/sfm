@@ -1,5 +1,6 @@
 import {
   Injectable, NotFoundException, ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -71,10 +72,57 @@ export class AcademicYearsService {
   }
 
   async update(id: string, dto: UpdateAcademicYearDto): Promise<AcademicYear> {
-    const year = await this.findOne(id);
-    if (dto.isCurrent) await this.repo.update({}, { isCurrent: false });
-    Object.assign(year, dto);
-    return this.repo.save(year);
+    // Check if academic year exists
+    const existingYear = await this.findOne(id);
+    console.log(`Update year info ${JSON.stringify(dto)}`)
+    // Build update data - map isCurrent to isActive if your entity uses isActive
+    const updateData: any = {};
+
+    if (dto.name !== undefined) updateData.name = dto.name;
+    if (dto.startDate !== undefined) updateData.startDate = dto.startDate;
+    if (dto.endDate !== undefined) updateData.endDate = dto.endDate;
+    if (dto.description !== undefined) updateData.description = dto.description;
+    if (dto.isCurrent !== undefined) updateData.isCurrent = dto.isCurrent;
+
+
+    console.log('Update data being sent to repository:', updateData);
+
+    // Check if there's any data to update
+    if (Object.keys(updateData).length === 0) {
+      throw new BadRequestException('No valid update data provided');
+    }
+
+    // If dates are being updated, check for overlaps
+    if (dto.startDate || dto.endDate) {
+      const startDate = dto.startDate || existingYear.startDate;
+      const endDate = dto.endDate || existingYear.endDate;
+
+      const overlapping = await this.repo
+        .createQueryBuilder('ay')
+        .where('ay.id != :id', { id })
+        .andWhere(
+          '(ay.start_date <= :endDate AND ay.end_date >= :startDate)',
+          { startDate, endDate },
+        )
+        .getOne();
+
+      if (overlapping) {
+        throw new BadRequestException('Dates overlap with another academic year');
+      }
+    }
+
+    // If setting as current (active), unset others
+    if (updateData.isCurrent === true) {
+      console.log('set other to non current');
+      await this.repo.update({ isCurrent: true }, { isCurrent: false });
+    }
+
+    console.log(`set this one to current ${JSON.stringify(updateData)}`);
+    // Perform the update
+    await this.repo.update(id, updateData);
+
+    // Return the updated entity
+    return this.findOne(id);
   }
 
   async setCurrent(id: string): Promise<AcademicYear> {
@@ -96,10 +144,8 @@ export class AcademicYearsService {
      * RULES:
      *
      *  1. For each active student, determine their fee lines:
-     *     • If they have a StudentFeePlan  → use ONLY plan items
-     *       (the plan may include mandatory tuition + optional library/transport)
-     *     • If they have NO plan           → use all mandatory fee structures
-     *       for their class (class-specific OR school-wide with class_id = NULL)
+     *     • Mandatory fee structures for their class (always included)
+     *     • Optional fee structures in student.selected_fee_structure_ids (chosen at enrollment)
      *
      *  2. For each fee line, calculate:
      *     • amountPerPeriod = custom_amount ?? base_amount from fee_structure
@@ -170,7 +216,7 @@ export class AcademicYearsService {
       custom: 1,
     };
 
-    // Get all active students for this academic year with their user info
+    // Get all active students for this academic year
     const students = await this.dataSource.query(`
     SELECT 
       s.id, 
@@ -179,18 +225,12 @@ export class AcademicYearsService {
       s.class_id,
       s.admission_date,
       s.billing_frequency,
-      COALESCE(s.selected_fee_structure_ids, '{}') as selected_fee_structure_ids,
-      CASE WHEN COUNT(sfp.id) > 0 THEN true ELSE false END as has_plan
+      COALESCE(s.selected_fee_structure_ids, '{}') as selected_fee_structure_ids
     FROM students s
     INNER JOIN users u ON u.id = s.user_id
-    LEFT JOIN student_fee_plans sfp ON sfp.student_id = s.id 
-      AND sfp.academic_year_id = $1 
-      AND sfp.is_active = true
-      AND sfp.deleted_at IS NULL
     WHERE s.academic_year_id = $1
       AND s.is_active = true
       AND s.deleted_at IS NULL
-    GROUP BY s.id, u.first_name, u.last_name, s.registration_number, s.class_id, s.admission_date, s.billing_frequency, s.selected_fee_structure_ids
   `, [id]);
 
     const studentBreakdowns: StudentBreakdown[] = [];
@@ -199,50 +239,7 @@ export class AcademicYearsService {
       let lines: FeeLineBreakdown[] = [];
       let studentAnnualTotal = 0;
 
-      if (student.has_plan) {
-        // Get student's custom fee plan items
-        const planItems = await this.dataSource.query(`
-        SELECT 
-          fs.name as fee_name,
-          fs.category,
-          sfp.billing_frequency as frequency,
-          COALESCE(sfp.custom_amount, fs.amount) as monthly_rate,
-          sfp.custom_amount IS NOT NULL as is_custom_amount
-        FROM student_fee_plans sfp
-        JOIN fee_structures fs ON fs.id = sfp.fee_structure_id
-        WHERE sfp.student_id = $1 
-          AND sfp.academic_year_id = $2
-          AND sfp.is_active = true
-          AND sfp.deleted_at IS NULL
-          AND fs.is_active = true
-          AND fs.deleted_at IS NULL
-      `, [student.id, id]);
-
-        for (const item of planItems) {
-          const monthlyRate = Number(item.monthly_rate);
-          const freq = item.frequency;
-          const multiplier = frequencyMultiplier[freq] || 1;
-
-          // CRITICAL: amountPerPeriod = monthlyRate × multiplier
-          const amountPerPeriod = monthlyRate * multiplier;
-          const periodsPerYear = this.getPeriodsPerYear(freq);
-          const annualTotal = amountPerPeriod * periodsPerYear;
-
-          lines.push({
-            feeName: item.fee_name,
-            category: item.category,
-            frequency: freq,
-            monthlyRate: monthlyRate,
-            amountPerPeriod: amountPerPeriod,
-            periodsPerYear: periodsPerYear,
-            annualTotal: annualTotal,
-            isCustomAmount: item.is_custom_amount,
-            billingMonths: this.getBillingMonths(freq)
-          });
-
-          studentAnnualTotal += annualTotal;
-        }
-      } else {
+      {
         // Fetch ALL fee structures that apply to this student:
         //   1. Mandatory structures for their class (always included)
         //   2. Optional structures in selected_fee_structure_ids (chosen at enrollment)
@@ -300,7 +297,7 @@ export class AcademicYearsService {
         studentId: student.id,
         name: student.name,
         registrationNumber: student.registration_number,
-        hasPlan: student.has_plan,
+        hasPlan: false,
         lines: lines,
         studentAnnualTotal: studentAnnualTotal
       });

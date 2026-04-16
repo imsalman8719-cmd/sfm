@@ -19,7 +19,6 @@ import { FeeInvoice } from './modules/fee-invoices/entities/fee-invoice.entity';
 import { FeeWaiver } from './modules/fee-invoices/entities/fee-waiver.entity';
 import { Payment } from './modules/payments/entities/payment.entity';
 import { NotificationLog } from './modules/notifications/entities/notification-log.entity';
-import { StudentFeePlan } from './modules/student-fee-plans/entities/student-fee-plan.entity';
 import { GlobalSettings } from './modules/settings/entities/global-settings.entity';
 
 // Feature Modules
@@ -33,7 +32,6 @@ import { FeeInvoicesModule } from './modules/fee-invoices/fee-invoices.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
-import { StudentFeePlansModule } from './modules/student-fee-plans/student-fee-plans.module';
 import { SettingsModule } from './modules/settings/settings.module';
 
 @Module({
@@ -65,7 +63,7 @@ import { SettingsModule } from './modules/settings/settings.module';
         entities: [
           User, AcademicYear, Class, Student,
           FeeStructure, Discount, FeeInvoice, FeeWaiver,
-          Payment, NotificationLog, StudentFeePlan, GlobalSettings,
+          Payment, NotificationLog, GlobalSettings,
         ],
         synchronize: config.get('database.sync'),
         logging: config.get('database.logging'),
@@ -75,7 +73,7 @@ import { SettingsModule } from './modules/settings/settings.module';
     AuthModule, UsersModule, AcademicYearsModule, ClassesModule,
     StudentsModule, FeeStructuresModule, FeeInvoicesModule,
     PaymentsModule, ReportsModule, NotificationsModule,
-    StudentFeePlansModule, SettingsModule,
+    SettingsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
