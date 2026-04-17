@@ -172,6 +172,10 @@ export class ReportsService {
       const collected = await this.getCollectedForMonth(academicYearId, ym.year, ym.month);
       const invoiced = await this.getInvoicedForMonth(academicYearId, ym.month, ym.year);
 
+      const achievementRate = target > 0
+        ? ((collected / target) * 100).toFixed(1) + '%'
+        : collected > 0 ? '—' : 'N/A';   // '—' when target=0 but money was collected
+
       monthlyData.push({
         month: ym.month,
         year: ym.year,
@@ -179,45 +183,68 @@ export class ReportsService {
         target,
         invoiced,
         collected,
-        shortfall: Math.max(0, target - collected),
+        shortfall: target > 0 ? Math.max(0, target - collected) : 0,
         surplus: Math.max(0, collected - target),
-        achievementRate: target > 0 ? ((collected / target) * 100).toFixed(1) + '%' : 'N/A',
+        achievementRate,
       });
     }
 
-    // Build quarterly data by grouping monthly data into calendar quarters.
-    // - Only include a quarter if at least one of its months is in the academic year.
-    // - Recompute qTarget from monthlyTargets (YYYY-M keys) rather than the cached
-    //   DB quarterlyTargets (which may have been saved with the old plain-month keys).
+    // Build quarterly data grouped by (calendarYear, quarterNumber) pairs.
+    //
+    // A multi-year academic year (e.g. Feb 2026–Mar 2027) spans TWO sets of Q1-Q4.
+    // Grouping by quarter number alone (1-4) incorrectly merges Feb 2026 + Mar 2026
+    // with Jan 2027 + Feb 2027 + Mar 2027 into one "Q1" — wrong target, wrong invoice total.
+    //
+    // Correct approach: build one entry per unique (year, quarter) combination that
+    // contains at least one month from the academic year.
     const quarterlyData: any[] = [];
-    for (let q = 1; q <= 4; q++) {
-      const calendarMonths = this.getQuarterMonths(q); // e.g. [1,2,3] for Q1
-      // Filter to only months that actually exist in the academic year
-      const relevantMonthData = monthlyData.filter(d => calendarMonths.includes(d.month));
-      if (relevantMonthData.length === 0) continue;
 
-      // Recompute target from live monthlyTargets instead of cached quarterlyTargets
-      const qTarget = relevantMonthData.reduce((s, d) => {
-        const key = `${d.year}-${d.month}`;
-        return s + (year.monthlyTargets?.[key] || 0);
+    // Collect unique (year, quarter) pairs from monthlyData
+    const yearQuarterMap = new Map<string, typeof monthlyData>();
+    for (const m of monthlyData) {
+      const q = Math.ceil(m.month / 3);
+      const key = `${m.year}-Q${q}`;
+      if (!yearQuarterMap.has(key)) yearQuarterMap.set(key, []);
+      yearQuarterMap.get(key)!.push(m);
+    }
+
+    // Sort keys chronologically
+    const sortedKeys = Array.from(yearQuarterMap.keys()).sort((a, b) => {
+      const [ay, aq] = a.split('-Q').map(Number);
+      const [by, bq] = b.split('-Q').map(Number);
+      return ay !== by ? ay - by : aq - bq;
+    });
+
+    for (const key of sortedKeys) {
+      const months = yearQuarterMap.get(key)!;
+      const [yearStr, qStr] = key.split('-');
+      const qNum = parseInt(qStr.replace('Q', ''));
+      const calYear = parseInt(yearStr);
+
+      const qTarget = months.reduce((s, d) => {
+        return s + (year.monthlyTargets?.[`${d.year}-${d.month}`] || 0);
       }, 0);
 
-      const qCollected = relevantMonthData.reduce((s, d) => s + d.collected, 0);
-      const qInvoiced  = relevantMonthData.reduce((s, d) => s + d.invoiced,  0);
+      const qCollected = months.reduce((s, d) => s + d.collected, 0);
+      const qInvoiced  = months.reduce((s, d) => s + d.invoiced,  0);
 
-      // Build label showing only months in the academic year
-      const monthLabels = relevantMonthData
+      const monthLabels = months
         .map(d => `${this.getMonthName(d.month)} ${d.year}`)
         .join(', ');
 
       quarterlyData.push({
-        quarter: `Q${q}`,
+        quarter: `Q${qNum} ${calYear}`,
         months: monthLabels,
         target: qTarget,
         invoiced: qInvoiced,
         collected: qCollected,
         shortfall: Math.max(0, qTarget - qCollected),
-        achievementRate: qTarget > 0 ? ((qCollected / qTarget) * 100).toFixed(1) + '%' : 'N/A',
+        achievementRate: qTarget > 0
+          ? ((qCollected / qTarget) * 100).toFixed(1) + '%'
+          : qCollected > 0 ? '—' : 'N/A',
+        // Store for isCurrentQuarter check on frontend
+        calYear,
+        calQuarter: qNum,
       });
     }
 
@@ -693,14 +720,15 @@ private async getRecentPayments(academicYearId: string, limit: number): Promise<
   }
 
   private async getInvoicedForMonth(academicYearId: string, month: number, year?: number): Promise<number> {
+    // Use issue_date month/year to attribute invoices to the period they were raised.
+    // This correctly handles semi-annual and quarterly invoices (which have NULL billing_month)
+    // by attributing them to the month the invoice was actually issued.
     const qb = this.invoiceRepo.createQueryBuilder('inv')
       .select('SUM(inv.total_amount)', 'total')
       .where('inv.academic_year_id = :ay', { ay: academicYearId })
-      .andWhere('inv.billing_month = :month', { month })
+      .andWhere('EXTRACT(MONTH FROM inv.issue_date) = :month', { month })
       .andWhere('inv.status != :cancelled', { cancelled: InvoiceStatus.CANCELLED });
-    // When year is provided (multi-year academic years), filter to avoid double-counting
-    // e.g. Feb 2026 and Feb 2027 are different billing periods
-    if (year) qb.andWhere('inv.billing_year = :year', { year });
+    if (year) qb.andWhere('EXTRACT(YEAR FROM inv.issue_date) = :year', { year });
     const r = await qb.getRawOne();
     return parseFloat(r?.total || '0');
   }
@@ -709,9 +737,9 @@ private async getRecentPayments(academicYearId: string, limit: number): Promise<
     const qb = this.invoiceRepo.createQueryBuilder('inv')
       .select('SUM(inv.balance_amount)', 'total')
       .where('inv.academic_year_id = :ay', { ay: academicYearId })
-      .andWhere('inv.billing_month = :month', { month })
+      .andWhere('EXTRACT(MONTH FROM inv.issue_date) = :month', { month })
       .andWhere('inv.balance_amount > 0');
-    if (year) qb.andWhere('inv.billing_year = :year', { year });
+    if (year) qb.andWhere('EXTRACT(YEAR FROM inv.issue_date) = :year', { year });
     const r = await qb.getRawOne();
     return parseFloat(r?.total || '0');
   }

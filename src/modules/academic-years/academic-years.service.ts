@@ -1,6 +1,5 @@
 import {
-  Injectable, NotFoundException, ConflictException,
-  BadRequestException,
+  Injectable, NotFoundException, ConflictException, BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -24,6 +23,7 @@ export interface StudentBreakdown {
   studentId: string;
   name: string;
   registrationNumber: string;
+  admissionDate?: string;
   hasPlan: boolean;
   lines: FeeLineBreakdown[];
   studentAnnualTotal: number;
@@ -287,6 +287,7 @@ export class AcademicYearsService {
 
       studentBreakdowns.push({
         studentId: student.id,
+        admissionDate: student.admission_date,
         name: student.name,
         registrationNumber: student.registration_number,
         hasPlan: false,
@@ -368,9 +369,6 @@ export class AcademicYearsService {
     // annual      → first month of the academic year
     // one_time    → first month of the academic year
 
-    const firstKey = yearMonths[0]?.key;
-    const yearMonthKeys = new Set(yearMonths.map(ym => ym.key));
-
     // Build which keys apply for quarterly (last month of each quarter: Mar,Jun,Sep,Dec)
     const quarterlyKeys = yearMonths
       .filter(ym => [3, 6, 9, 12].includes(ym.month))
@@ -385,29 +383,103 @@ export class AcademicYearsService {
     const annualKey = yearMonths[yearMonths.length - 1]?.key;
 
     for (const student of studentBreakdowns) {
+      // Use the student's actual admission month as the starting point for targets.
+      // Fees should not appear in months before the student enrolled.
+      const admDate = student.admissionDate ? new Date(student.admissionDate) : null;
+      const enrollYear  = admDate ? admDate.getFullYear()  : yearMonths[0]?.year;
+      const enrollMonth = admDate ? admDate.getMonth() + 1 : yearMonths[0]?.month;
+      // Use numeric comparison (year*100+month) to avoid lexicographic pitfall:
+      // "2026-10" < "2026-4" as strings but 202610 > 202604 as numbers ✓
+      const enrollOrd = (enrollYear ?? 0) * 100 + (enrollMonth ?? 0);
+      const afterEnroll = (ym: { year: number; month: number }) =>
+        ym.year * 100 + ym.month >= enrollOrd;
+
+      // Months from enrollment to year end (for monthly / recurring fees)
+      const monthsFromEnrollment = yearMonths.filter(afterEnroll);
+
+      // Rolling period keys — mirrors exactly what computeBillingPeriods() does
+      // in fee-invoices.service.ts so target matches actual invoice schedule.
+
+      // Semi-annual: Period 1 = enrollment month, Period 2 = enrollment+6mo, etc.
+      const semiRollingKeys: string[] = [];
+      {
+        let cur = new Date((enrollYear ?? 2000), (enrollMonth ?? 1) - 1 + 6, 1);
+        while (cur.getFullYear() * 100 + cur.getMonth() + 1 <= (yearMonths[yearMonths.length-1]?.year ?? 9999) * 100 + (yearMonths[yearMonths.length-1]?.month ?? 12)) {
+          const k = `${cur.getFullYear()}-${cur.getMonth() + 1}`;
+          if (monthlyTargets[k] !== undefined) semiRollingKeys.push(k);
+          cur.setMonth(cur.getMonth() + 6);
+        }
+      }
+
+      // Quarterly: Period 1 = enrollment month, Period 2 = enrollment+3mo, etc.
+      const quarterlyRollingKeys: string[] = [];
+      {
+        let cur = new Date((enrollYear ?? 2000), (enrollMonth ?? 1) - 1 + 3, 1);
+        while (cur.getFullYear() * 100 + cur.getMonth() + 1 <= (yearMonths[yearMonths.length-1]?.year ?? 9999) * 100 + (yearMonths[yearMonths.length-1]?.month ?? 12)) {
+          const k = `${cur.getFullYear()}-${cur.getMonth() + 1}`;
+          if (monthlyTargets[k] !== undefined) quarterlyRollingKeys.push(k);
+          cur.setMonth(cur.getMonth() + 3);
+        }
+      }
+
+      // The enrollment month key — first invoice is always raised here
+      const enrollKey = `${enrollYear}-${enrollMonth}`;
+
       for (const line of student.lines) {
         const amountPerPeriod = line.amountPerPeriod;
         let targetKeys: string[];
 
+        // RULE: The first invoice always combines admission fee + first billing period
+        // and is raised in the enrollment month. So for ALL recurring fee types,
+        // the FIRST period target goes into the enrollment month.
+        // Subsequent periods go into their normal billing months.
+        //
+        // This mirrors exactly what fee-invoices.service.ts generateYearInvoices() does:
+        //   Invoice #1 (enrollment month): admissionFees + recurringFees[first period]
+        //   Invoice #2..N: recurringFees[remaining periods]
+
+        // periodsPerYear tells us how many invoices this student gets total.
+        // Period 1 always goes to the enrollment month (first combined invoice).
+        // Periods 2..N go to the natural billing months AFTER enrollment.
+        const periodsPerYear = this.getPeriodsPerYear(line.frequency);
+
         switch (line.frequency) {
           case 'monthly':
-          case 'custom':
-            targetKeys = yearMonths.map(ym => ym.key);
+          case 'custom': {
+            // 12 periods: one per month from enrollment onward (already correct)
+            targetKeys = monthsFromEnrollment.map(ym => ym.key);
             break;
-          case 'quarterly':
-            targetKeys = quarterlyKeys;
+          }
+          case 'quarterly': {
+            // Period 1 → enrollment month (combined with admission fee invoice)
+            // Periods 2..N → rolling 3-month intervals after enrollment
+            // e.g. enrolled Apr 2026 → Apr(P1), Jul(P2), Oct(P3), Jan 2027(P4)
+            targetKeys = [enrollKey, ...quarterlyRollingKeys].filter(
+              k => monthlyTargets[k] !== undefined,
+            );
             break;
-          case 'semi_annual':
-            targetKeys = semiAnnualKeys;
+          }
+          case 'semi_annual': {
+            // Period 1 → enrollment month (combined with admission fee invoice)
+            // Periods 2..N → rolling 6-month intervals after enrollment
+            // e.g. enrolled Apr 2026 → Apr(P1), Oct 2026(P2) = 2 periods
+            targetKeys = [enrollKey, ...semiRollingKeys].filter(
+              k => monthlyTargets[k] !== undefined,
+            );
             break;
-          case 'annual':
-            targetKeys = annualKey ? [annualKey] : [];
+          }
+          case 'annual': {
+            // 1 period total → enrollment month only
+            targetKeys = monthlyTargets[enrollKey] !== undefined ? [enrollKey] : [];
             break;
-          case 'one_time':
-            targetKeys = firstKey ? [firstKey] : [];
+          }
+          case 'one_time': {
+            // 1 period → enrollment month only
+            targetKeys = monthlyTargets[enrollKey] !== undefined ? [enrollKey] : [];
             break;
+          }
           default:
-            targetKeys = yearMonths.map(ym => ym.key);
+            targetKeys = monthsFromEnrollment.map(ym => ym.key);
         }
 
         for (const key of targetKeys) {

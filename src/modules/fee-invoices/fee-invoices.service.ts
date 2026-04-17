@@ -249,55 +249,60 @@ export class FeeInvoicesService {
       }
 
     } else if (frequency === FeeFrequency.QUARTERLY) {
-      // Quarters: Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec
-      const quarterStarts = [1, 4, 7, 10]; // month numbers
+      // Rolling 3-month periods from admission month to year end.
+      // Period 1 starts at admission month → combined with admission fee in Invoice #1.
+      // e.g. Admitted Apr 2026: P1=Apr, P2=Jul, P3=Oct, P4=Jan 2027
+      const admStart = new Date(admissionDate.getFullYear(), admissionDate.getMonth(), 1);
+      let cursor = new Date(admStart);
 
-      for (const qStart of quarterStarts) {
-        const year = admissionDate.getFullYear();
-        const qStartDate = new Date(year, qStart - 1, 1);
-        const qEnd = new Date(year, qStart + 1, 0); // last day of the quarter end month
-
-        // Skip if this quarter has already fully passed
-        if (qEnd < admissionDate) continue;
-        // Skip if quarter starts after year end
-        if (qStartDate > yearEnd) continue;
-
-        const quarter = Math.ceil(qStart / 3);
-        const issueDate = qStartDate < admissionDate ? new Date(admissionDate) : qStartDate;
+      while (cursor <= yearEnd) {
+        const isFirst = cursor.getTime() === admStart.getTime();
+        const issueDate = isFirst ? new Date(admissionDate) : new Date(cursor);
+        const periodMonth = cursor.getMonth() + 1;
+        const periodYear = cursor.getFullYear();
+        const quarter = Math.ceil(periodMonth / 3);
 
         periods.push({
           issueDate,
           dueDate: addDays(issueDate, dueDays),
-          label: `Q${quarter} ${year} Fee`,
+          label: `Q${quarter} ${periodYear} Fee`,
           billingQuarter: quarter,
-          billingYear: year,
+          billingYear: periodYear,
           multiplier: 3,
         });
+
+        cursor = addMonths(cursor, 3);
       }
 
     } else if (frequency === FeeFrequency.SEMI_ANNUAL) {
-      // H1=Jan-Jun, H2=Jul-Dec
-      const halves = [
-        { h: 1, start: 1, end: 6 },
-        { h: 2, start: 7, end: 12 },
-      ];
-      const year = admissionDate.getFullYear();
+      // Rolling 6-month periods from the admission month to year end.
+      // Period 1 starts at admission month → generateYearInvoices combines it with admission fee.
+      // Period 2 starts 6 months later, Period 3 another 6 months later, etc.
+      // e.g. Admitted Apr 2026, year ends Mar 2027:
+      //   Period 1: Apr 2026 (raised Apr 17 as "Admission + H1 2026 Fee")
+      //   Period 2: Oct 2026 (raised Oct 1 as "H2 2026 Fee")
+      let cursor = new Date(admissionDate.getFullYear(), admissionDate.getMonth(), 1);
+      let halfNum = 1;
 
-      for (const half of halves) {
-        const hStart = new Date(year, half.start - 1, 1);
-        const hEnd = new Date(year, half.end, 0);
-        if (hEnd < admissionDate) continue;
-        if (hStart > yearEnd) continue;
+      while (cursor <= yearEnd) {
+        const issueDate = cursor.getTime() === new Date(admissionDate.getFullYear(), admissionDate.getMonth(), 1).getTime()
+          ? new Date(admissionDate)   // Period 1: issue on enrollment day
+          : new Date(cursor);         // Later periods: issue on 1st of that month
 
-        const issueDate = hStart < admissionDate ? new Date(admissionDate) : hStart;
+        const periodYear = cursor.getFullYear();
+        const periodLabel = `${issueDate.toLocaleString('en', { month: 'short' })} ${periodYear}–${addMonths(new Date(cursor), 5).toLocaleString('en', { month: 'short' })} ${addMonths(new Date(cursor), 5).getFullYear()}`;
+
         periods.push({
           issueDate,
           dueDate: addDays(issueDate, dueDays),
-          label: `Half-Year H${half.h} ${year} Fee`,
-          billingQuarter: half.h,
-          billingYear: year,
+          label: `${periodLabel} Fee`,
+          billingQuarter: halfNum,
+          billingYear: periodYear,
           multiplier: 6,
         });
+
+        cursor = addMonths(cursor, 6);
+        halfNum++;
       }
 
     } else if (frequency === FeeFrequency.ANNUAL) {
@@ -457,8 +462,10 @@ export class FeeInvoicesService {
     if (filters.academicYearId) idQb.andWhere('inv.academic_year_id = :ay', { ay: filters.academicYearId });
     if (filters.classId) idQb.andWhere('cls.id = :classId', { classId: filters.classId });
     if (filters.status) idQb.andWhere('inv.status = :status', { status: filters.status });
-    if (filters.billingMonth) idQb.andWhere('inv.billing_month = :month', { month: filters.billingMonth });
-    if (filters.billingYear) idQb.andWhere('inv.billing_year = :year', { year: filters.billingYear });
+    // Use issue_date for month/year filtering so quarterly and semi-annual invoices
+    // (which have billing_month = NULL) are correctly included when filtering by month.
+    if (filters.billingMonth) idQb.andWhere('EXTRACT(MONTH FROM inv.issue_date) = :month', { month: filters.billingMonth });
+    if (filters.billingYear) idQb.andWhere('EXTRACT(YEAR FROM inv.issue_date) = :year', { year: filters.billingYear });
     if (filters.billingQuarter) idQb.andWhere('inv.billing_quarter = :q', { q: filters.billingQuarter });
     if (filters.fromDate) idQb.andWhere('inv.issue_date >= :from', { from: filters.fromDate });
     if (filters.toDate) idQb.andWhere('inv.issue_date <= :to', { to: filters.toDate });
