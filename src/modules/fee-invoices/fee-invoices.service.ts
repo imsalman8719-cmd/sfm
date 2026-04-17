@@ -18,7 +18,7 @@ import {
   CancelInvoiceDto, ApplyWaiverDto, ReviewWaiverDto, InvoiceFilterDto,
 } from './dto/fee-invoice.dto';
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
-import { InvoiceStatus, DiscountType, WaiverStatus, FeeFrequency, FeeCategory } from '../../common/enums';
+import { InvoiceStatus, DiscountType, WaiverStatus, FeeFrequency } from '../../common/enums';
 import { NotificationsService } from '../notifications/notifications.service';
 
 // How many monthly base amounts are bundled per invoice period
@@ -84,8 +84,10 @@ export class FeeInvoicesService {
     // Load all applicable fee structures for this student
     const allFeeStructures = await this.resolveStudentFeeStructures(student);
 
-    const admissionFees = allFeeStructures.filter(fs => fs.category === FeeCategory.ADMISSION);
-    const recurringFees = allFeeStructures.filter(fs => fs.category !== FeeCategory.ADMISSION);
+    // One-time fees (admission, registration) go on the first invoice only.
+    // Recurring fees are spread across all billing periods.
+    const admissionFees = allFeeStructures.filter(fs => fs.isOneTime);
+    const recurringFees = allFeeStructures.filter(fs => !fs.isOneTime);
 
     const generated: FeeInvoice[] = [];
 
@@ -165,7 +167,7 @@ export class FeeInvoicesService {
       .andWhere('fs.is_active = true')
       .andWhere('fs.deleted_at IS NULL')
       .andWhere('(fs.class_id = :classId OR fs.class_id IS NULL)', { classId: student.classId || null })
-      .orderBy('fs.sort_order', 'ASC')
+      .orderBy('fs.created_at', 'ASC')
       .getMany();
 
     // Optional (student's explicit selections)
@@ -365,7 +367,7 @@ export class FeeInvoicesService {
       return {
         feeStructureId: fs.id,
         feeName: fs.name,
-        category: fs.category,
+        category: fs.isOneTime ? 'one-time' : 'recurring',
         amount: feeAmount,
         discountAmount,
         netAmount: feeAmount - discountAmount,
@@ -587,24 +589,81 @@ export class FeeInvoicesService {
   // ─────────────────────────────────────────────────────────────────────────
   // SCHEDULED JOBS
   // ─────────────────────────────────────────────────────────────────────────
+  /**
+   * Runs every day at midnight.
+   *
+   * 1. Marks invoices as OVERDUE once their due date passes.
+   * 2. Applies late fees to invoices that have passed the grace period
+   *    (due_date + gracePeriodDays < today).
+   *
+   * Late fee logic (from GlobalSettings):
+   *   • percentage: lateFeeAmount = balanceAmount × (lateFeeValue / 100)
+   *   • fixed:      lateFeeAmount = lateFeeValue (flat amount, applied once)
+   *
+   * A late fee is only applied ONCE per invoice (checked via lateFeeAmount > 0).
+   */
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
   async markOverdueInvoices(): Promise<void> {
     const settings = await this.settingsRepo.findOne({ where: { id: 'global' } });
     if (settings && !settings.autoOverdueMarkingEnabled) return;
 
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Step 1: Mark all past-due unpaid invoices as OVERDUE
     await this.invoiceRepo.createQueryBuilder()
       .update(FeeInvoice)
       .set({ status: InvoiceStatus.OVERDUE })
-      .where('due_date < :today', { today: new Date() })
+      .where('due_date < :today', { today })
       .andWhere('status IN (:...statuses)', { statuses: [InvoiceStatus.ISSUED, InvoiceStatus.PARTIALLY_PAID] })
       .andWhere('balance_amount > 0')
       .execute();
+
+    // Step 2: Apply late fees if enabled and grace period has passed
+    if (!settings?.lateFeeEnabled || !settings?.lateFeeValue) return;
+
+    const graceDays = settings.gracePeriodDays ?? 0;
+
+    // Find OVERDUE invoices where:
+    //   - grace period has passed  (due_date + graceDays < today)
+    //   - late fee not yet applied (late_fee_amount = 0)
+    //   - still has a balance
+    const overdueForLateFee = await this.invoiceRepo
+      .createQueryBuilder('inv')
+      .where('inv.status = :status', { status: InvoiceStatus.OVERDUE })
+      .andWhere('inv.balance_amount > 0')
+      .andWhere('inv.late_fee_amount = 0')
+      .andWhere(`inv.due_date + INTERVAL '${graceDays} days' < :today`, { today })
+      .getMany();
+
+    for (const inv of overdueForLateFee) {
+      let lateFeeAmount: number;
+
+      if (settings.lateFeeType === 'percentage') {
+        // Percentage of the outstanding balance
+        lateFeeAmount = Math.round((Number(inv.balanceAmount) * Number(settings.lateFeeValue)) / 100 * 100) / 100;
+      } else {
+        // Fixed flat amount
+        lateFeeAmount = Number(settings.lateFeeValue);
+      }
+
+      if (lateFeeAmount <= 0) continue;
+
+      inv.lateFeeAmount = lateFeeAmount;
+      inv.totalAmount   = Number(inv.totalAmount)   + lateFeeAmount;
+      inv.balanceAmount = Number(inv.balanceAmount) + lateFeeAmount;
+
+      await this.invoiceRepo.save(inv);
+
+      // Notify student
+      this.notificationsService.sendOverdueNotification(inv, inv.student).catch(() => {});
+    }
   }
 
   @Cron('0 9 * * *')
   async sendPaymentReminders(): Promise<void> {
     const settings = await this.settingsRepo.findOne({ where: { id: 'global' } });
-    if (settings && !settings.autoReminderEnabled) return;
+    if (!settings || !settings.reminderDaysBeforeDue) return;
     const daysBeforeDue = settings?.reminderDaysBeforeDue ?? 3;
     const dueSoon = addDays(new Date(), daysBeforeDue);
     const invoices = await this.invoiceRepo.createQueryBuilder('inv')

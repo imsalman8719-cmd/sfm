@@ -1,46 +1,37 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsInt, IsBoolean, IsString, Min, Max } from 'class-validator';
+import { IsOptional, IsInt, IsBoolean, IsString, IsNumber, IsIn, Min, Max } from 'class-validator';
 
 export class UpdateSettingsDto {
-  @ApiPropertyOptional({ description: 'Day of month (1-28) to auto-generate monthly invoices' })
-  @IsOptional() @IsInt() @Min(1) @Max(28)
-  monthlyInvoiceDay?: number;
-
-  @ApiPropertyOptional({ description: 'Days before quarter end to generate quarterly invoices' })
-  @IsOptional() @IsInt() @Min(1) @Max(60)
-  quarterlyInvoiceDaysBefore?: number;
-
-  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(1) @Max(90)
-  semiAnnualInvoiceDaysBefore?: number;
-
-  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(1) @Max(90)
-  annualInvoiceDaysBefore?: number;
-
-  @ApiPropertyOptional({ description: 'Default number of days from issue date to due date' })
+  @ApiPropertyOptional({ description: 'Days from invoice issue date to due date (default: 10)', example: 10 })
   @IsOptional() @IsInt() @Min(1) @Max(90)
   defaultDueDays?: number;
 
-  @ApiPropertyOptional() @IsOptional() @IsBoolean()
-  autoInvoiceEnabled?: boolean;
+  @ApiPropertyOptional({ description: 'Grace period in days after due date before late fee applies (default: 7, set 0 for immediate)', example: 7 })
+  @IsOptional() @IsInt() @Min(0) @Max(30)
+  gracePeriodDays?: number;
 
-  @ApiPropertyOptional() @IsOptional() @IsBoolean()
-  autoOverdueMarkingEnabled?: boolean;
+  @ApiPropertyOptional({ description: 'Apply late fees on overdue invoices' })
+  @IsOptional() @IsBoolean()
+  lateFeeEnabled?: boolean;
 
-  @ApiPropertyOptional() @IsOptional() @IsBoolean()
-  autoReminderEnabled?: boolean;
+  @ApiPropertyOptional({ description: '"percentage" or "fixed"', enum: ['percentage', 'fixed'] })
+  @IsOptional() @IsIn(['percentage', 'fixed'])
+  lateFeeType?: 'percentage' | 'fixed';
 
-  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(1) @Max(30)
+  @ApiPropertyOptional({ description: 'Late fee amount — percentage (e.g. 2 = 2%) or fixed PKR amount', example: 2 })
+  @IsOptional() @IsNumber() @Min(0)
+  lateFeeValue?: number;
+
+  @ApiPropertyOptional({ description: 'Days before due date to send reminder (0 = disable)', example: 3 })
+  @IsOptional() @IsInt() @Min(0) @Max(30)
   reminderDaysBeforeDue?: number;
 
-  @ApiPropertyOptional() @IsOptional() @IsString()
-  schoolName?: string;
+  @ApiPropertyOptional({ description: 'Nightly cron marks unpaid invoices as overdue after due date' })
+  @IsOptional() @IsBoolean()
+  autoOverdueMarkingEnabled?: boolean;
 
-  @ApiPropertyOptional() @IsOptional() @IsString()
-  schoolAddress?: string;
-
-  @ApiPropertyOptional() @IsOptional() @IsString()
-  schoolPhone?: string;
-
-  @ApiPropertyOptional() @IsOptional() @IsString()
-  currencySymbol?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() schoolName?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() schoolAddress?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() schoolPhone?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() currencySymbol?: string;
 }

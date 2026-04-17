@@ -1,62 +1,62 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import {
-  IsString, IsNotEmpty, IsOptional, IsUUID, IsEnum, IsNumber, IsBoolean,
-  IsArray, IsInt, Min, Max, ValidateNested, IsDateString,
+  IsString, IsNotEmpty, IsOptional, IsUUID, IsNumber, IsBoolean, Min,
 } from 'class-validator';
-import { Type, Transform } from 'class-transformer';
-import {
-  FeeCategory, FeeFrequency, DiscountType, DiscountCategory,
-} from '../../../common/enums';
-
-export class InstallmentDto {
-  @ApiProperty() @IsInt() installmentNo: number;
-  @ApiProperty() @IsNumber() amount: number;
-  @ApiProperty() @IsDateString() dueDate: string;
-  @ApiProperty() @IsString() label: string;
-}
+import { Transform } from 'class-transformer';
+import { DiscountCategory, DiscountType } from '../../../common/enums';
 
 export class CreateFeeStructureDto {
-  @ApiProperty() @IsString() @IsNotEmpty() name: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
-  @ApiProperty({ enum: FeeCategory }) @IsEnum(FeeCategory) category: FeeCategory;
-  @ApiProperty({ enum: FeeFrequency }) @IsEnum(FeeFrequency) frequency: FeeFrequency;
-  @ApiProperty() @IsNumber() @Min(0) amount: number;
-  @ApiProperty() @IsUUID() academicYearId: string;
+  @ApiProperty({ example: 'Monthly Tuition Fee' })
+  @IsString() @IsNotEmpty()
+  name: string;
 
-  // Transform empty string → undefined so @IsOptional skips @IsUUID validation.
-  // The frontend sends classId: "" when "All Classes" is selected; this means
-  // the fee structure should apply to all classes (class_id = NULL in DB).
-  @ApiPropertyOptional({ description: 'Leave empty or omit for all classes' })
-  @IsOptional()
+  @ApiPropertyOptional({ example: 'Core tuition fee charged every billing period' })
+  @IsOptional() @IsString()
+  description?: string;
+
+  @ApiProperty({ example: 8500, description: 'Monthly base amount in PKR' })
+  @IsNumber() @Min(0)
+  amount: number;
+
+  @ApiProperty()
   @IsUUID()
+  academicYearId: string;
+
+  @ApiPropertyOptional({ description: 'Leave empty to apply to all classes' })
+  @IsOptional() @IsUUID()
   @Transform(({ value }) => (value === '' || value === null ? undefined : value))
   classId?: string;
 
-  @ApiPropertyOptional() @IsOptional() @IsBoolean() isMandatory?: boolean;
-  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(1) @Max(31) dueDayOfMonth?: number;
-  @ApiPropertyOptional() @IsOptional() @IsDateString() dueDate?: string;
-  @ApiPropertyOptional() @IsOptional() @IsBoolean() lateFeeEnabled?: boolean;
-  @ApiPropertyOptional({ enum: DiscountType }) @IsOptional() @IsEnum(DiscountType) lateFeeType?: DiscountType;
-  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) lateFeeValue?: number;
-  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(0) gracePeriodDays?: number;
-  @ApiPropertyOptional({ type: [InstallmentDto] }) @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => InstallmentDto) installmentSchedule?: InstallmentDto[];
-  @ApiPropertyOptional({ type: [Number] }) @IsOptional() @IsArray() applicableMonths?: number[];
-  @ApiPropertyOptional() @IsOptional() @IsInt() sortOrder?: number;
+  @ApiPropertyOptional({
+    description: 'true = always included in every invoice. false = student selects at enrollment.',
+    default: true,
+  })
+  @IsOptional() @IsBoolean()
+  isMandatory?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'true = charged once at enrollment (admission fee). false = recurring each billing period.',
+    default: false,
+  })
+  @IsOptional() @IsBoolean()
+  isOneTime?: boolean;
 }
 
 export class UpdateFeeStructureDto extends PartialType(CreateFeeStructureDto) {}
 
+// ── Discounts (unchanged) ────────────────────────────────────────────────────
+
 export class CreateDiscountDto {
   @ApiProperty() @IsString() @IsNotEmpty() name: string;
   @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
-  @ApiProperty({ enum: DiscountCategory }) @IsEnum(DiscountCategory) category: DiscountCategory;
-  @ApiProperty({ enum: DiscountType }) @IsEnum(DiscountType) type: DiscountType;
+  @ApiProperty({ enum: DiscountCategory }) category: DiscountCategory;
+  @ApiProperty({ enum: DiscountType }) type: DiscountType;
   @ApiProperty() @IsNumber() @Min(0) value: number;
   @ApiProperty() @IsUUID() academicYearId: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() studentId?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() feeStructureId?: string;
-  @ApiPropertyOptional() @IsOptional() @IsDateString() validFrom?: string;
-  @ApiPropertyOptional() @IsOptional() @IsDateString() validUntil?: string;
+  @ApiPropertyOptional() @IsOptional() validFrom?: string;
+  @ApiPropertyOptional() @IsOptional() validUntil?: string;
 }
 
 export class UpdateDiscountDto extends PartialType(CreateDiscountDto) {}

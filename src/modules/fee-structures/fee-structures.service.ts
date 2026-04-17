@@ -47,8 +47,7 @@ export class FeeStructuresService {
     const total = await idQb.getCount();
 
     const ids = await idQb
-      .orderBy('fs.sort_order', 'ASC')
-      .addOrderBy('fs.category', 'ASC')
+      .orderBy('fs.name', 'ASC')
       .addOrderBy('fs.id', 'ASC')
       .offset(pagination.skip)
       .limit(pagination.limit)
@@ -76,7 +75,7 @@ export class FeeStructuresService {
       .where('fs.academic_year_id = :ay', { ay: academicYearId })
       .andWhere('fs.is_active = true')
       .andWhere('(fs.class_id = :classId OR fs.class_id IS NULL)', { classId: studentClassId })
-      .orderBy('fs.sort_order', 'ASC')
+      .orderBy('fs.name', 'ASC')
       .getMany();
   }
 
