@@ -23,8 +23,8 @@ export class StudentsService {
 
   async create(dto: CreateStudentDto, createdBy?: string): Promise<Student> {
     // Step 1: Validate email uniqueness
-    const existingUser = await this.userRepo.findOne({ where: { email: dto.email } });
-    if (existingUser) throw new ConflictException('Email already in use');
+    // const existingUser = await this.userRepo.findOne({ where: { email: dto.email } });
+    // if (existingUser) throw new ConflictException('Email already in use');
 
     let savedStudent: Student;
 

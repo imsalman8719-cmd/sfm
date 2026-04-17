@@ -13,7 +13,6 @@ import { CoreEntity } from '../../../common/entities/core.entity';
 import { UserRole, UserStatus, Gender } from '../../../common/enums';
 
 @Entity('users')
-@Index(['email'], { unique: true })
 export class User extends CoreEntity {
   @Column({ name: 'first_name', length: 100 })
   firstName: string;
@@ -21,8 +20,8 @@ export class User extends CoreEntity {
   @Column({ name: 'last_name', length: 100 })
   lastName: string;
 
-  @Column({ unique: true, length: 150 })
-  email: string;
+  @Column({ nullable: true, length: 150 })
+  email: string | null;
 
   @Column({ nullable: true, length: 20 })
   phone: string;

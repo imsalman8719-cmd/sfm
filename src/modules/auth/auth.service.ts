@@ -25,8 +25,9 @@ export class AuthService {
     private readonly userRepository: Repository<User>,
   ) {}
 
-  async validateUser(email: string, password: string): Promise<User> {
-    const user = await this.usersService.findByEmail(email);
+  async validateUser(identifier: string, password: string): Promise<User> {
+    // Look up staff by employeeId, or students by registrationNumber
+    const user = await this.usersService.findByIdentifier(identifier);
     if (!user) throw new UnauthorizedException('Invalid credentials');
 
     const valid = await user.validatePassword(password);
@@ -36,7 +37,7 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
-    const user = await this.validateUser(dto.email, dto.password);
+    const user = await this.validateUser(dto.identifier, dto.password);
 
     await this.usersService.updateLastLogin(user.id);
 
@@ -76,9 +77,9 @@ export class AuthService {
     await this.usersService.setRefreshToken(userId, null);
   }
 
-  async forgotPassword(email: string): Promise<string> {
-    const user = await this.usersService.findByEmail(email);
-    if (!user) return 'If email exists, reset link has been sent'; // No enumeration
+  async forgotPassword(identifier: string): Promise<string> {
+    const user = await this.usersService.findByIdentifier(identifier);
+    if (!user) return 'If account exists, reset link has been sent'; // No enumeration
 
     const resetToken = uuidv4();
     const hashedToken = await bcrypt.hash(resetToken, 10);

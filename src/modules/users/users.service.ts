@@ -19,8 +19,10 @@ export class UsersService {
   ) {}
 
   async create(dto: CreateUserDto, createdBy?: string): Promise<User> {
-    const existing = await this.userRepository.findOne({ where: { email: dto.email } });
-    if (existing) throw new ConflictException('Email already in use');
+    if (dto.email) {
+      const existing = await this.userRepository.findOne({ where: { email: dto.email } });
+      if (existing) throw new ConflictException('Email already in use');
+    }
 
     const user = this.userRepository.create({
       ...dto,
@@ -56,7 +58,34 @@ export class UsersService {
   }
 
   async findByEmail(email: string): Promise<User | null> {
+    if (!email) return null;
     return this.userRepository.findOne({ where: { email } });
+  }
+
+  /**
+   * Finds a user by:
+   *   1. employeeId   — for staff (admin, finance, teacher, etc.)
+   *   2. Student registrationNumber — queries the students table then loads the linked user
+   *
+   * This is the primary lookup used for login.
+   */
+  async findByIdentifier(identifier: string): Promise<User | null> {
+    if (!identifier) return null;
+
+    // 1. Try employeeId (staff)
+    const byEmployeeId = await this.userRepository.findOne({ where: { employeeId: identifier } });
+    if (byEmployeeId) return byEmployeeId;
+
+    // 2. Try student registrationNumber
+    const studentRow = await this.dataSource.query(
+      `SELECT user_id FROM students WHERE registration_number = $1 AND deleted_at IS NULL LIMIT 1`,
+      [identifier],
+    );
+    if (studentRow?.length) {
+      return this.userRepository.findOne({ where: { id: studentRow[0].user_id } });
+    }
+
+    return null;
   }
 
   async update(id: string, dto: UpdateUserDto): Promise<User> {

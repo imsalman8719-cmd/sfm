@@ -160,17 +160,22 @@ export class ReportsService {
     const year = await this.yearRepo.findOne({ where: { id: academicYearId } });
     if (!year) throw new Error('Academic year not found');
 
-    const monthlyData: any[] = [];
-    const currentYear = new Date().getFullYear();
+    // Build the actual months in this academic year (may span two calendar years)
+    const academicMonths = this.getAcademicYearMonths(new Date(year.startDate), new Date(year.endDate));
 
-    for (let month = 1; month <= 12; month++) {
-      const target = year.monthlyTargets?.[month.toString()] || 0;
-      const collected = await this.getCollectedForMonth(academicYearId, currentYear, month);
-      const invoiced = await this.getInvoicedForMonth(academicYearId, month);
+    const monthlyData: any[] = [];
+
+    for (const ym of academicMonths) {
+      // monthlyTargets keys are now 'YYYY-M' (e.g. '2026-2')
+      const targetKey = `${ym.year}-${ym.month}`;
+      const target = year.monthlyTargets?.[targetKey] || 0;
+      const collected = await this.getCollectedForMonth(academicYearId, ym.year, ym.month);
+      const invoiced = await this.getInvoicedForMonth(academicYearId, ym.month);
 
       monthlyData.push({
-        month,
-        monthName: this.getMonthName(month),
+        month: ym.month,
+        year: ym.year,
+        monthName: `${this.getMonthName(ym.month)} ${ym.year}`,
         target,
         invoiced,
         collected,
@@ -183,13 +188,16 @@ export class ReportsService {
     const quarterlyData: any[] = [];
     for (let q = 1; q <= 4; q++) {
       const months = this.getQuarterMonths(q);
-      const qTarget = year.quarterlyTargets?.[`Q${q}`] || months.reduce((s, m) => s + (year.monthlyTargets?.[m.toString()] || 0), 0);
+      const qTarget = year.quarterlyTargets?.[`Q${q}`] || 0;
       const qCollected = monthlyData
         .filter((d) => months.includes(d.month))
         .reduce((s, d) => s + d.collected, 0);
       const qInvoiced = monthlyData
         .filter((d) => months.includes(d.month))
         .reduce((s, d) => s + d.invoiced, 0);
+
+      // Only include quarters that have at least one month in this academic year
+      if (!monthlyData.some(d => months.includes(d.month))) continue;
 
       quarterlyData.push({
         quarter: `Q${q}`,
@@ -220,56 +228,92 @@ export class ReportsService {
 
   // ── Defaulter List ──────────────────────────────────────────────────────────
 
+  /**
+   * Defaulter: a student who has at least one invoice where the due date
+   * has passed (due_date < today) and the balance is still unpaid.
+   *
+   * A student with a future-due invoice is NOT a defaulter — they are simply
+   * outstanding. Only missed due dates make a defaulter.
+   */
   async getDefaulterList(filters: ReportFilterDto): Promise<any> {
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
     const qb = this.dataSource.createQueryBuilder()
       .select('s.id', 'studentId')
       .addSelect('s.registration_number', 'registrationNumber')
       .addSelect('u.first_name', 'firstName')
       .addSelect('u.last_name', 'lastName')
-      .addSelect('u.email', 'email')
       .addSelect('s.father_phone', 'fatherPhone')
       .addSelect('s.father_name', 'fatherName')
       .addSelect('cls.name', 'className')
       .addSelect('cls.grade', 'grade')
-      .addSelect('SUM(inv.balance_amount)', 'totalDue')
+      // Only count invoices that are PAST their due date and unpaid
+      .addSelect(
+        `SUM(CASE WHEN inv.due_date < :today AND inv.balance_amount > 0 THEN inv.balance_amount ELSE 0 END)`,
+        'totalDue',
+      )
       .addSelect('SUM(inv.total_amount)', 'totalBilled')
       .addSelect('SUM(inv.paid_amount)', 'totalPaid')
-      .addSelect('COUNT(inv.id)', 'pendingInvoices')
+      // Count only the overdue-unpaid invoices, not all invoices
+      .addSelect(
+        `COUNT(CASE WHEN inv.due_date < :today AND inv.balance_amount > 0 THEN 1 END)`,
+        'overdueInvoices',
+      )
+      .addSelect('COUNT(inv.id)', 'totalInvoices')
       .addSelect('MIN(inv.due_date)', 'oldestDueDate')
       .from(Student, 's')
       .innerJoin('users', 'u', 'u.id = s.user_id')
       .leftJoin('classes', 'cls', 'cls.id = s.class_id')
       .innerJoin(
         'fee_invoices', 'inv',
-        `inv.student_id = s.id AND inv.balance_amount > 0
+        `inv.student_id = s.id
          AND inv.status NOT IN ('cancelled', 'waived')`,
       )
       .where('s.is_active = true')
-      .andWhere('s.deleted_at IS NULL');
+      .andWhere('s.deleted_at IS NULL')
+      .setParameter('today', today);
 
     if (filters.academicYearId) {
       qb.andWhere('inv.academic_year_id = :ay', { ay: filters.academicYearId });
     }
-    if (filters.classId) qb.andWhere('cls.id = :classId', { classId: filters.classId });
+    if (filters.classId) {
+      qb.andWhere('cls.id = :classId', { classId: filters.classId });
+    }
 
-    qb.groupBy('s.id, s.registration_number, u.first_name, u.last_name, u.email, s.father_phone, s.father_name, cls.name, cls.grade')
-      .having('SUM(inv.balance_amount) > 0')
-      .orderBy('SUM(inv.balance_amount)', 'DESC');
+    qb
+      .groupBy(
+        's.id, s.registration_number, u.first_name, u.last_name, s.father_phone, s.father_name, cls.name, cls.grade',
+      )
+      // A defaulter = has at least one invoice past due date with unpaid balance
+      .having(
+        `SUM(CASE WHEN inv.due_date < :today AND inv.balance_amount > 0 THEN inv.balance_amount ELSE 0 END) > 0`,
+      )
+      .orderBy(
+        `SUM(CASE WHEN inv.due_date < :today AND inv.balance_amount > 0 THEN inv.balance_amount ELSE 0 END)`,
+        'DESC',
+      );
 
-    const defaulters = await qb.getRawMany();
-
-    const totalOutstanding = defaulters.reduce((s, d) => s + parseFloat(d.totalDue), 0);
+    const rows = await qb.getRawMany();
+    const totalOutstanding = rows.reduce((s, d) => s + parseFloat(d.totalDue || '0'), 0);
 
     return {
       filters,
-      summary: { defaulterCount: defaulters.length, totalOutstanding },
-      defaulters: defaulters.map((d) => ({
-        ...d,
-        totalDue: parseFloat(d.totalDue),
-        totalBilled: parseFloat(d.totalBilled),
-        totalPaid: parseFloat(d.totalPaid),
-        pendingInvoices: parseInt(d.pendingInvoices),
-        oldestDueDate: d.oldestDueDate,
+      summary: { defaulterCount: rows.length, totalOutstanding },
+      defaulters: rows.map((d) => ({
+        studentId:        d.studentId,
+        registrationNumber: d.registrationNumber,
+        firstName:        d.firstName,
+        lastName:         d.lastName,
+        fatherPhone:      d.fatherPhone,
+        fatherName:       d.fatherName,
+        className:        d.className,
+        grade:            d.grade,
+        totalDue:         parseFloat(d.totalDue   || '0'),
+        totalBilled:      parseFloat(d.totalBilled || '0'),
+        totalPaid:        parseFloat(d.totalPaid  || '0'),
+        overdueInvoices:  parseInt(d.overdueInvoices || '0'),
+        totalInvoices:    parseInt(d.totalInvoices   || '0'),
+        oldestDueDate:    d.oldestDueDate,
       })),
     };
   }
@@ -330,18 +374,22 @@ export class ReportsService {
   // ── Monthly Summary ─────────────────────────────────────────────────────────
 
   async getMonthlySummary(academicYearId: string, year: number): Promise<any> {
-    const months = Array.from({ length: 12 }, (_, i) => i + 1);
+    const academicYear = await this.yearRepo.findOne({ where: { id: academicYearId } });
+    const academicMonths = academicYear
+      ? this.getAcademicYearMonths(new Date(academicYear.startDate), new Date(academicYear.endDate))
+      : Array.from({ length: 12 }, (_, i) => ({ year, month: i + 1 }));
 
     const monthlyData = await Promise.all(
-      months.map(async (month) => {
+      academicMonths.map(async (ym) => {
         const [invoiced, collected, outstanding] = await Promise.all([
-          this.getInvoicedForMonth(academicYearId, month),
-          this.getCollectedForMonth(academicYearId, year, month),
-          this.getOutstandingForMonth(academicYearId, month),
+          this.getInvoicedForMonth(academicYearId, ym.month),
+          this.getCollectedForMonth(academicYearId, ym.year, ym.month),
+          this.getOutstandingForMonth(academicYearId, ym.month),
         ]);
         return {
-          month,
-          monthName: this.getMonthName(month),
+          month: ym.month,
+          year: ym.year,
+          monthName: `${this.getMonthName(ym.month)} ${ym.year}`,
           invoiced,
           collected,
           outstanding,
@@ -511,10 +559,15 @@ export class ReportsService {
   }
 
   private async getOverdueAmount(academicYearId: string): Promise<number> {
+    // Use due_date < today instead of relying on status = OVERDUE,
+    // so the number is accurate even before the nightly cron has run.
+    const today = new Date().toISOString().split('T')[0];
     const r = await this.invoiceRepo.createQueryBuilder('inv')
       .select('SUM(inv.balance_amount)', 'total')
       .where('inv.academic_year_id = :ay', { ay: academicYearId })
-      .andWhere('inv.status = :status', { status: InvoiceStatus.OVERDUE })
+      .andWhere('inv.due_date < :today', { today })
+      .andWhere('inv.balance_amount > 0')
+      .andWhere('inv.status NOT IN (:...excl)', { excl: [InvoiceStatus.CANCELLED, InvoiceStatus.WAIVED] })
       .getRawOne();
     return parseFloat(r?.total || '0');
   }
@@ -528,10 +581,23 @@ export class ReportsService {
   }
 
   private async getDefaulterCount(academicYearId: string): Promise<number> {
+    // A defaulter = student with at least one invoice whose due_date < today
+    // and still has an unpaid balance (same definition as getDefaulterList).
+    const today = new Date().toISOString().split('T')[0];
     const r = await this.dataSource.createQueryBuilder()
       .select('COUNT(DISTINCT s.id)', 'count')
       .from(Student, 's')
-      .innerJoin('fee_invoices', 'inv', 'inv.student_id = s.id AND inv.academic_year_id = :ay AND inv.balance_amount > 0', { ay: academicYearId })
+      .innerJoin(
+        'fee_invoices', 'inv',
+        `inv.student_id = s.id
+         AND inv.academic_year_id = :ay
+         AND inv.due_date < :today
+         AND inv.balance_amount > 0
+         AND inv.status NOT IN ('cancelled', 'waived')`,
+        { ay: academicYearId, today },
+      )
+      .where('s.is_active = true')
+      .andWhere('s.deleted_at IS NULL')
       .getRawOne();
     return parseInt(r?.count || '0');
   }
@@ -655,6 +721,17 @@ private async getRecentPayments(academicYearId: string, limit: number): Promise<
       acc[key] = (acc[key] || 0) + valueGetter(item);
       return acc;
     }, {} as Record<string, number>);
+  }
+
+  private getAcademicYearMonths(startDate: Date, endDate: Date): Array<{year:number;month:number}> {
+    const months: Array<{year:number;month:number}> = [];
+    const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+    const end    = new Date(endDate.getFullYear(),   endDate.getMonth(),   1);
+    while (cursor <= end) {
+      months.push({ year: cursor.getFullYear(), month: cursor.getMonth() + 1 });
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return months;
   }
 
   private getMonthName(month: number): string {

@@ -10,7 +10,7 @@ export class CreateStudentDto {
   // User account
   @ApiProperty() @IsString() @IsNotEmpty() firstName: string;
   @ApiProperty() @IsString() @IsNotEmpty() lastName: string;
-  @ApiProperty() @IsEmail() email: string;
+  @ApiPropertyOptional() @IsOptional() @IsEmail() email: string;
   @ApiProperty() @IsString() password: string;
   @ApiPropertyOptional({ enum: Gender }) @IsOptional() @IsEnum(Gender) gender?: Gender;
   @ApiPropertyOptional() @IsOptional() @IsDateString() dateOfBirth?: string;

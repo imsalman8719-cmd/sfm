@@ -14,7 +14,8 @@ import { UserRole, UserStatus, Gender } from '../../../common/enums';
 export class CreateUserDto {
   @ApiProperty() @IsString() @IsNotEmpty() firstName: string;
   @ApiProperty() @IsString() @IsNotEmpty() lastName: string;
-  @ApiProperty() @IsEmail() email: string;
+  @ApiPropertyOptional({ description: 'Optional — used for notifications only. Login uses employeeId or registrationNumber.' })
+  @IsOptional() @IsEmail() email?: string;
   @ApiProperty() @IsString() @MinLength(8) password: string;
   @ApiProperty({ enum: UserRole }) @IsEnum(UserRole) role: UserRole;
 

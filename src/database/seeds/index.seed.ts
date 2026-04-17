@@ -16,7 +16,7 @@ async function seed() {
   const feeRepo = AppDataSource.getRepository(FeeStructure);
 
   // ── 1. Super Admin ──────────────────────────────────────────────────────────
-  let superAdmin = await userRepo.findOne({ where: { email: 'superadmin@school.edu' } });
+  let superAdmin = await userRepo.findOne({ where: { employeeId: 'EMP-SA-001' } });
   if (!superAdmin) {
     superAdmin = userRepo.create({
       firstName: 'Super',
@@ -34,7 +34,7 @@ async function seed() {
   }
 
   // ── 2. Finance User ─────────────────────────────────────────────────────────
-  let financeUser = await userRepo.findOne({ where: { email: 'finance@school.edu' } });
+  let financeUser = await userRepo.findOne({ where: { employeeId: 'EMP-FIN-001' } });
   if (!financeUser) {
     financeUser = userRepo.create({
       firstName: 'Finance',
@@ -53,7 +53,7 @@ async function seed() {
   }
 
   // ── 3. Admission User ───────────────────────────────────────────────────────
-  let admissionUser = await userRepo.findOne({ where: { email: 'admission@school.edu' } });
+  let admissionUser = await userRepo.findOne({ where: { employeeId: 'EMP-ADM-001' } });
   if (!admissionUser) {
     admissionUser = userRepo.create({
       firstName: 'Admission',

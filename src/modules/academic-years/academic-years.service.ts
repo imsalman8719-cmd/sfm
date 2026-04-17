@@ -295,8 +295,9 @@ export class AcademicYearsService {
       });
     }
 
-    // Calculate monthly targets based on when payments are collected
-    const monthlyTargets = this.calculateMonthlyTargets(studentBreakdowns);
+    // Calculate monthly targets based on academic year months only
+    const yearMonths = this.getAcademicYearMonths(new Date(year.startDate), new Date(year.endDate));
+    const monthlyTargets = this.calculateMonthlyTargets(studentBreakdowns, yearMonths);
     const quarterlyTargets = this.calculateQuarterlyTargets(monthlyTargets);
     const annualTarget = studentBreakdowns.reduce((sum, s) => sum + s.studentAnnualTotal, 0);
 
@@ -326,36 +327,93 @@ export class AcademicYearsService {
 
   private getBillingMonths(frequency: string): string {
     const months: Record<string, string> = {
-      monthly: 'Jan–Dec (every month)',
-      quarterly: 'Mar, Jun, Sep, Dec',
-      semi_annual: 'Jun, Dec',
-      annual: 'Dec only',
-      one_time: 'Jan only',
-      custom: 'Jan–Dec (every month)'
+      monthly: 'Every month',
+      quarterly: 'Every quarter end (Mar, Jun, Sep, Dec)',
+      semi_annual: 'Jun & Dec',
+      annual: 'Last month of year',
+      one_time: 'Enrollment month only',
+      custom: 'Every month'
     };
-    return months[frequency] || 'Monthly';
+    return months[frequency] || 'Every month';
   }
 
-  private calculateMonthlyTargets(studentBreakdowns: StudentBreakdown[]): Record<string, number> {
-    const monthlyTargets: Record<string, number> = {};
-    for (let i = 1; i <= 12; i++) monthlyTargets[i.toString()] = 0;
+  /**
+   * Returns every calendar month (as {year, month} pairs) covered by this academic year.
+   * e.g. Feb 2026 → Apr 2027 gives:
+   *   [{2026,2},{2026,3},...,{2026,12},{2027,1},{2027,2},{2027,3},{2027,4}]
+   */
+  private getAcademicYearMonths(startDate: Date, endDate: Date): Array<{year:number;month:number;key:string}> {
+    const months: Array<{year:number;month:number;key:string}> = [];
+    const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+    const end    = new Date(endDate.getFullYear(),   endDate.getMonth(),   1);
+    while (cursor <= end) {
+      months.push({ year: cursor.getFullYear(), month: cursor.getMonth() + 1, key: `${cursor.getFullYear()}-${cursor.getMonth()+1}` });
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return months;
+  }
 
-    const billingMonthsMap: Record<string, number[]> = {
-      monthly: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-      quarterly: [3, 6, 9, 12],
-      semi_annual: [6, 12],
-      annual: [12],
-      one_time: [1],
-      custom: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-    };
+  private calculateMonthlyTargets(
+    studentBreakdowns: StudentBreakdown[],
+    yearMonths: Array<{year:number;month:number;key:string}>,
+  ): Record<string, number> {
+    // Initialise only the months that actually exist in this academic year
+    const monthlyTargets: Record<string, number> = {};
+    for (const ym of yearMonths) monthlyTargets[ym.key] = 0;
+
+    // Which month-keys get each billing frequency's payment?
+    // monthly     → every month in the year
+    // quarterly   → last month of each quarter that falls within the year
+    // semi_annual → Jun and Dec of each calendar year within the year
+    // annual      → first month of the academic year
+    // one_time    → first month of the academic year
+
+    const firstKey = yearMonths[0]?.key;
+    const yearMonthKeys = new Set(yearMonths.map(ym => ym.key));
+
+    // Build which keys apply for quarterly (last month of each quarter: Mar,Jun,Sep,Dec)
+    const quarterlyKeys = yearMonths
+      .filter(ym => [3, 6, 9, 12].includes(ym.month))
+      .map(ym => ym.key);
+
+    // Build which keys apply for semi_annual (Jun and Dec)
+    const semiAnnualKeys = yearMonths
+      .filter(ym => [6, 12].includes(ym.month))
+      .map(ym => ym.key);
+
+    // Build which key applies for annual (last month of academic year)
+    const annualKey = yearMonths[yearMonths.length - 1]?.key;
 
     for (const student of studentBreakdowns) {
       for (const line of student.lines) {
         const amountPerPeriod = line.amountPerPeriod;
-        const months = billingMonthsMap[line.frequency] || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let targetKeys: string[];
 
-        for (const month of months) {
-          monthlyTargets[month.toString()] += amountPerPeriod;
+        switch (line.frequency) {
+          case 'monthly':
+          case 'custom':
+            targetKeys = yearMonths.map(ym => ym.key);
+            break;
+          case 'quarterly':
+            targetKeys = quarterlyKeys;
+            break;
+          case 'semi_annual':
+            targetKeys = semiAnnualKeys;
+            break;
+          case 'annual':
+            targetKeys = annualKey ? [annualKey] : [];
+            break;
+          case 'one_time':
+            targetKeys = firstKey ? [firstKey] : [];
+            break;
+          default:
+            targetKeys = yearMonths.map(ym => ym.key);
+        }
+
+        for (const key of targetKeys) {
+          if (monthlyTargets[key] !== undefined) {
+            monthlyTargets[key] += amountPerPeriod;
+          }
         }
       }
     }
@@ -364,11 +422,19 @@ export class AcademicYearsService {
   }
 
   private calculateQuarterlyTargets(monthlyTargets: Record<string, number>): Record<string, number> {
+    // Sum all monthly target keys — keys are now 'YYYY-M'
+    const total = (months: number[]) =>
+      Object.entries(monthlyTargets)
+        .filter(([key]) => {
+          const m = parseInt(key.split('-')[1]);
+          return months.includes(m);
+        })
+        .reduce((s, [, v]) => s + v, 0);
     return {
-      Q1: (monthlyTargets['1'] || 0) + (monthlyTargets['2'] || 0) + (monthlyTargets['3'] || 0),
-      Q2: (monthlyTargets['4'] || 0) + (monthlyTargets['5'] || 0) + (monthlyTargets['6'] || 0),
-      Q3: (monthlyTargets['7'] || 0) + (monthlyTargets['8'] || 0) + (monthlyTargets['9'] || 0),
-      Q4: (monthlyTargets['10'] || 0) + (monthlyTargets['11'] || 0) + (monthlyTargets['12'] || 0),
+      Q1: total([1, 2, 3]),
+      Q2: total([4, 5, 6]),
+      Q3: total([7, 8, 9]),
+      Q4: total([10, 11, 12]),
     };
   }
 

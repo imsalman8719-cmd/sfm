@@ -1,10 +1,14 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { IsNotEmpty, IsString, MinLength } from 'class-validator';
 
 export class LoginDto {
-  @ApiProperty({ example: 'admin@school.edu' })
-  @IsEmail()
-  email: string;
+  @ApiProperty({
+    description: 'Employee ID (for staff) or Student Registration Number (for students)',
+    example: 'EMP-001 or STU-2026-XXXX',
+  })
+  @IsString()
+  @IsNotEmpty()
+  identifier: string;   // employeeId for staff, registrationNumber for students
 
   @ApiProperty()
   @IsString()
@@ -13,9 +17,10 @@ export class LoginDto {
 }
 
 export class ForgotPasswordDto {
-  @ApiProperty()
-  @IsEmail()
-  email: string;
+  @ApiProperty({ description: 'Employee ID or Registration Number' })
+  @IsString()
+  @IsNotEmpty()
+  identifier: string;
 }
 
 export class ResetPasswordDto {
