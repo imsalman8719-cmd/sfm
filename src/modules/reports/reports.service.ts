@@ -170,7 +170,7 @@ export class ReportsService {
       const targetKey = `${ym.year}-${ym.month}`;
       const target = year.monthlyTargets?.[targetKey] || 0;
       const collected = await this.getCollectedForMonth(academicYearId, ym.year, ym.month);
-      const invoiced = await this.getInvoicedForMonth(academicYearId, ym.month);
+      const invoiced = await this.getInvoicedForMonth(academicYearId, ym.month, ym.year);
 
       monthlyData.push({
         month: ym.month,
@@ -185,23 +185,34 @@ export class ReportsService {
       });
     }
 
+    // Build quarterly data by grouping monthly data into calendar quarters.
+    // - Only include a quarter if at least one of its months is in the academic year.
+    // - Recompute qTarget from monthlyTargets (YYYY-M keys) rather than the cached
+    //   DB quarterlyTargets (which may have been saved with the old plain-month keys).
     const quarterlyData: any[] = [];
     for (let q = 1; q <= 4; q++) {
-      const months = this.getQuarterMonths(q);
-      const qTarget = year.quarterlyTargets?.[`Q${q}`] || 0;
-      const qCollected = monthlyData
-        .filter((d) => months.includes(d.month))
-        .reduce((s, d) => s + d.collected, 0);
-      const qInvoiced = monthlyData
-        .filter((d) => months.includes(d.month))
-        .reduce((s, d) => s + d.invoiced, 0);
+      const calendarMonths = this.getQuarterMonths(q); // e.g. [1,2,3] for Q1
+      // Filter to only months that actually exist in the academic year
+      const relevantMonthData = monthlyData.filter(d => calendarMonths.includes(d.month));
+      if (relevantMonthData.length === 0) continue;
 
-      // Only include quarters that have at least one month in this academic year
-      if (!monthlyData.some(d => months.includes(d.month))) continue;
+      // Recompute target from live monthlyTargets instead of cached quarterlyTargets
+      const qTarget = relevantMonthData.reduce((s, d) => {
+        const key = `${d.year}-${d.month}`;
+        return s + (year.monthlyTargets?.[key] || 0);
+      }, 0);
+
+      const qCollected = relevantMonthData.reduce((s, d) => s + d.collected, 0);
+      const qInvoiced  = relevantMonthData.reduce((s, d) => s + d.invoiced,  0);
+
+      // Build label showing only months in the academic year
+      const monthLabels = relevantMonthData
+        .map(d => `${this.getMonthName(d.month)} ${d.year}`)
+        .join(', ');
 
       quarterlyData.push({
         quarter: `Q${q}`,
-        months: months.map((m) => this.getMonthName(m)).join(', '),
+        months: monthLabels,
         target: qTarget,
         invoiced: qInvoiced,
         collected: qCollected,
@@ -211,7 +222,11 @@ export class ReportsService {
     }
 
     const annualCollected = monthlyData.reduce((s, d) => s + d.collected, 0);
-    const annualTarget = Number(year.feeTarget) || 0;
+    // Recompute annual target from live YYYY-M monthly targets instead of cached feeTarget,
+    // which may have been saved with the old plain-month-number key format.
+    const annualTarget = year.monthlyTargets
+      ? Object.values(year.monthlyTargets).reduce((s: number, v: any) => s + Number(v), 0)
+      : Number(year.feeTarget) || 0;
 
     return {
       academicYear: year.name,
@@ -382,9 +397,9 @@ export class ReportsService {
     const monthlyData = await Promise.all(
       academicMonths.map(async (ym) => {
         const [invoiced, collected, outstanding] = await Promise.all([
-          this.getInvoicedForMonth(academicYearId, ym.month),
+          this.getInvoicedForMonth(academicYearId, ym.month, ym.year),
           this.getCollectedForMonth(academicYearId, ym.year, ym.month),
-          this.getOutstandingForMonth(academicYearId, ym.month),
+          this.getOutstandingForMonth(academicYearId, ym.month, ym.year),
         ]);
         return {
           month: ym.month,
@@ -677,23 +692,27 @@ private async getRecentPayments(academicYearId: string, limit: number): Promise<
     return parseFloat(r?.total || '0');
   }
 
-  private async getInvoicedForMonth(academicYearId: string, month: number): Promise<number> {
-    const r = await this.invoiceRepo.createQueryBuilder('inv')
+  private async getInvoicedForMonth(academicYearId: string, month: number, year?: number): Promise<number> {
+    const qb = this.invoiceRepo.createQueryBuilder('inv')
       .select('SUM(inv.total_amount)', 'total')
       .where('inv.academic_year_id = :ay', { ay: academicYearId })
       .andWhere('inv.billing_month = :month', { month })
-      .andWhere('inv.status != :cancelled', { cancelled: InvoiceStatus.CANCELLED })
-      .getRawOne();
+      .andWhere('inv.status != :cancelled', { cancelled: InvoiceStatus.CANCELLED });
+    // When year is provided (multi-year academic years), filter to avoid double-counting
+    // e.g. Feb 2026 and Feb 2027 are different billing periods
+    if (year) qb.andWhere('inv.billing_year = :year', { year });
+    const r = await qb.getRawOne();
     return parseFloat(r?.total || '0');
   }
 
-  private async getOutstandingForMonth(academicYearId: string, month: number): Promise<number> {
-    const r = await this.invoiceRepo.createQueryBuilder('inv')
+  private async getOutstandingForMonth(academicYearId: string, month: number, year?: number): Promise<number> {
+    const qb = this.invoiceRepo.createQueryBuilder('inv')
       .select('SUM(inv.balance_amount)', 'total')
       .where('inv.academic_year_id = :ay', { ay: academicYearId })
       .andWhere('inv.billing_month = :month', { month })
-      .andWhere('inv.balance_amount > 0')
-      .getRawOne();
+      .andWhere('inv.balance_amount > 0');
+    if (year) qb.andWhere('inv.billing_year = :year', { year });
+    const r = await qb.getRawOne();
     return parseFloat(r?.total || '0');
   }
 
